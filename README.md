@@ -10,3 +10,4 @@ A thrilling stick figure archery battle game with ragdoll physics, upgrades, spe
 
 ## How to Play
 Open `index.html` in any modern web browser or run with a local web server (e.g., Live Server or `npx serve`).
+
