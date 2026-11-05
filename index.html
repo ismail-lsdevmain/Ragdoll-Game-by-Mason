@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ragdoll Archers - Stick Figure Archery Battle Game</title>
+  <meta name="description" content="Play Ragdoll Archers! A thrilling stick figure archery battle game with ragdoll physics, upgrades, and special arrows. Play solo or challenge a friend!">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Main Menu -->
+  <div id="main-menu" class="screen active">
+    <div class="stars-bg"></div>
+    <div class="menu-container">
+      <div class="game-logo">
+        <h1>RAGDOLL</h1>
+        <h1 class="accent">ARCHERS</h1>
+        <p class="subtitle">SEASON 3</p>
+      </div>
+      <div class="mode-buttons">
+        <button id="btn-1player" class="mode-btn" onclick="startGame('1player')">
+          <span class="mode-icon">🏹</span>
+          <span class="mode-label">1 PLAYER</span>
+          <span class="mode-desc">Horde survival</span>
+        </button>
+        <button id="btn-pvp" class="mode-btn pvp" onclick="startGame('pvp')">
+          <span class="mode-icon">⚔️</span>
+          <span class="mode-label">DUEL</span>
+          <span class="mode-desc">1v1 vs AI</span>
+        </button>
+        <button id="btn-2player" class="mode-btn" onclick="startGame('2player')">
+          <span class="mode-icon">👥</span>
+          <span class="mode-label">2 PLAYERS</span>
+          <span class="mode-desc">Local Co-op</span>
+        </button>
+      </div>
+      <div class="best-line" id="best-line"></div>
+      <div class="menu-footer">
+        <button class="footer-btn" id="btn-leaders" onclick="showLeaderboard()">🏆 LEADERS</button>
+        <button class="footer-btn" id="btn-settings" onclick="showSettings()">⚙️ SETTINGS</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Game Screen -->
+  <div id="game-screen" class="screen">
+    <div class="game-hud">
+      <div class="player-hud" id="p1-hud">
+        <div class="hud-name">PLAYER 1</div>
+        <div class="bar-wrap">
+          <div class="bar hp-bar"><div class="bar-fill" id="p1-hp-fill" style="width:100%"></div></div>
+          <span class="bar-label" id="p1-hp-label">100</span>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar stamina-bar"><div class="bar-fill" id="p1-stamina-fill" style="width:100%"></div></div>
+          <span class="bar-label" id="p1-stamina-label">100</span>
+        </div>
+        <div class="special-arrow-display" id="p1-special-display"></div>
+      </div>
+      <div class="round-info">
+        <span id="round-display">ROUND 1</span>
+        <div class="score-display">
+          <span id="p1-score">0</span> - <span id="p2-score">0</span>
+        </div>
+      </div>
+      <div class="player-hud right" id="p2-hud">
+        <div class="hud-name" id="p2-name">ENEMY</div>
+        <div class="bar-wrap">
+          <span class="bar-label" id="p2-hp-label">100</span>
+          <div class="bar hp-bar"><div class="bar-fill" id="p2-hp-fill" style="width:100%"></div></div>
+        </div>
+        <div class="bar-wrap">
+          <span class="bar-label" id="p2-stamina-label">100</span>
+          <div class="bar stamina-bar"><div class="bar-fill" id="p2-stamina-fill" style="width:100%"></div></div>
+        </div>
+        <div class="special-arrow-display" id="p2-special-display"></div>
+      </div>
+    </div>
+    <canvas id="game-canvas"></canvas>
+    <div id="ammo-menu" class="ammo-menu"></div>
+    <div class="game-controls">
+      <div class="ctrl-group">
+        <button class="ctrl-btn" id="btn-left" aria-label="Move left">◀</button>
+        <button class="ctrl-btn" id="btn-right" aria-label="Move right">▶</button>
+        <button class="ctrl-btn" id="p1-jump-btn" onmousedown="player1Jump()" ontouchstart="player1Jump()">JUMP<br><small>5 STAMINA</small></button>
+      </div>
+      <div class="hint-text" id="aim-hint">A/D to move  •  Hold &amp; drag to aim  •  Release to shoot</div>
+      <button class="ctrl-btn" id="p2-jump-btn" onmousedown="player2Jump()" ontouchstart="player2Jump()" style="display:none">JUMP<br><small>5 STAMINA</small></button>
+    </div>
+    <div class="game-bottom-bar">
+      <button class="icon-btn" onclick="showPause()">⚙️</button>
+      <button class="icon-btn" id="btn-upgrades" onclick="showUpgrades()">⬆️ UPGRADES</button>
+      <button class="icon-btn" onclick="showGameLeaderboard()">🏆 LEADERS</button>
+    </div>
+  </div>
+
+  <!-- Upgrades Panel -->
+  <div id="upgrades-panel" class="panel hidden">
+    <div class="panel-header">
+      <h2>SHOP</h2>
+      <button class="close-btn" onclick="closeUpgrades()">✕</button>
+    </div>
+    <div class="panel-coins">
+      <span>💰 COINS: <strong id="coins-display">0</strong></span>
+    </div>
+    <!-- Tabs -->
+    <div class="panel-tabs">
+      <button class="panel-tab active" id="tab-upgrades" onclick="switchTab('upgrades')">⬆️ UPGRADES</button>
+      <button class="panel-tab" id="tab-defences" onclick="switchTab('defences')">🏗️ DEFENCES</button>
+    </div>
+    <!-- Upgrades Content -->
+    <div id="tab-content-upgrades">
+      <div class="upgrades-grid">
+        <div class="upgrade-item" id="upg-armor">
+          <div class="upg-icon">🛡️</div>
+          <div class="upg-info">
+            <div class="upg-name">ARMOR</div>
+            <div class="upg-level" id="armor-level">+0</div>
+          </div>
+          <button class="upg-btn" onclick="upgrade('armor')">
+            <span class="upg-cost" id="armor-cost">⚙️10</span>
+          </button>
+        </div>
+        <div class="upgrade-item" id="upg-health">
+          <div class="upg-icon">❤️</div>
+          <div class="upg-info">
+            <div class="upg-name">HEALTH</div>
+            <div class="upg-level" id="health-level">+0</div>
+          </div>
+          <button class="upg-btn" onclick="upgrade('health')">
+            <span class="upg-cost" id="health-cost">⚙️10</span>
+          </button>
+        </div>
+        <div class="upgrade-item" id="upg-stamina">
+          <div class="upg-icon">⚡</div>
+          <div class="upg-info">
+            <div class="upg-name">STAMINA</div>
+            <div class="upg-level" id="stamina-level">+0</div>
+          </div>
+          <button class="upg-btn" onclick="upgrade('stamina')">
+            <span class="upg-cost" id="stamina-cost">⚙️10</span>
+          </button>
+        </div>
+        <div class="upgrade-item" id="upg-staminarefresh">
+          <div class="upg-icon">🔄</div>
+          <div class="upg-info">
+            <div class="upg-name">STAMINA REFRESH</div>
+            <div class="upg-level" id="staminarefresh-level">+0</div>
+          </div>
+          <button class="upg-btn" onclick="upgrade('staminarefresh')">
+            <span class="upg-cost" id="staminarefresh-cost">⚙️10</span>
+          </button>
+        </div>
+        <div class="upgrade-item" id="upg-pullspeed">
+          <div class="upg-icon">🏹</div>
+          <div class="upg-info">
+            <div class="upg-name">PULL SPEED</div>
+            <div class="upg-level" id="pullspeed-level">+0</div>
+          </div>
+          <button class="upg-btn" onclick="upgrade('pullspeed')">
+            <span class="upg-cost" id="pullspeed-cost">⚙️10</span>
+          </button>
+        </div>
+        <div class="upgrade-item" id="upg-damage">
+          <div class="upg-icon">💥</div>
+          <div class="upg-info">
+            <div class="upg-name">DAMAGE</div>
+            <div class="upg-level" id="damage-level">+0</div>
+          </div>
+          <button class="upg-btn" onclick="upgrade('damage')">
+            <span class="upg-cost" id="damage-cost">⚙️10</span>
+          </button>
+        </div>
+        <div class="upgrade-item" id="upg-arrowslots">
+          <div class="upg-icon">🗃️</div>
+          <div class="upg-info">
+            <div class="upg-name">ARROW SLOTS</div>
+            <div class="upg-level" id="arrowslots-level">+0</div>
+          </div>
+          <button class="upg-btn" onclick="upgrade('arrowslots')">
+            <span class="upg-cost" id="arrowslots-cost">⚙️50</span>
+          </button>
+        </div>
+      </div>
+      <h3 class="section-title">SPECIAL ARROWS</h3>
+      <div class="special-arrows-grid" id="special-arrows-grid"></div>
+    </div>
+    <!-- Defences Content -->
+    <div id="tab-content-defences" style="display:none">
+      <p style="color:var(--text-muted);font-size:12px;margin:8px 0 12px;text-align:center;">Buy defences here, then click PLACE and click on the battlefield to deploy them!</p>
+      <div class="special-arrows-grid" id="defences-grid"></div>
+    </div>
+  </div>
+
+  <!-- Pause Screen -->
+  <div id="pause-screen" class="overlay hidden">
+    <div class="overlay-content">
+      <h2>PAUSED</h2>
+      <button class="menu-action-btn" onclick="resumeGame()">▶ RESUME</button>
+      <button class="menu-action-btn" onclick="restartRound()">🔄 RESTART</button>
+      <button class="menu-action-btn" onclick="backToMenu()">🏠 MAIN MENU</button>
+    </div>
+  </div>
+
+  <!-- Round Over Screen -->
+  <div id="round-over" class="overlay hidden">
+    <div class="overlay-content">
+      <h2 id="round-result-title">ROUND OVER!</h2>
+      <p id="round-result-msg"></p>
+      <div class="coins-earned"><span id="coins-earned-amount"></span></div>
+      <button class="menu-action-btn" id="next-round-btn" onclick="nextRound()">NEXT ROUND ▶</button>
+      <button class="menu-action-btn" onclick="showUpgrades()">⬆️ UPGRADES</button>
+      <button class="menu-action-btn" onclick="backToMenu()">🏠 MAIN MENU</button>
+    </div>
+  </div>
+
+  <!-- Game Over Screen -->
+  <div id="game-over" class="overlay hidden">
+    <div class="overlay-content">
+      <h2 id="gameover-title">GAME OVER</h2>
+      <p id="gameover-msg"></p>
+      <div class="final-score">
+        <span id="final-score-display"></span>
+      </div>
+      <button class="menu-action-btn" onclick="restartGame()">🔄 PLAY AGAIN</button>
+      <button class="menu-action-btn" onclick="backToMenu()">🏠 MAIN MENU</button>
+    </div>
+  </div>
+
+  <!-- Leaderboard -->
+  <div id="leaderboard-screen" class="overlay hidden">
+    <div class="overlay-content wide">
+      <h2>🏆 LEADERBOARD</h2>
+      <div class="leaderboard-list" id="leaderboard-list"></div>
+      <button class="menu-action-btn" onclick="closeLeaderboard()">✕ CLOSE</button>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div id="settings-screen" class="overlay hidden">
+    <div class="overlay-content">
+      <h2>⚙️ SETTINGS</h2>
+      <div class="setting-row">
+        <label>Sound Effects</label>
+        <button class="toggle-btn" id="sfx-toggle" onclick="toggleSFX()">ON</button>
+      </div>
+      <div class="setting-row">
+        <label>Music</label>
+        <button class="toggle-btn" id="music-toggle" onclick="toggleMusic()">ON</button>
+      </div>
+      <div class="setting-row">
+        <label>Particles</label>
+        <button class="toggle-btn" id="particles-toggle" onclick="toggleParticles()">ON</button>
+      </div>
+      <div class="setting-row">
+        <label>Difficulty</label>
+        <select id="difficulty-select" onchange="changeDifficulty(this.value)">
+          <option value="easy">Easy</option>
+          <option value="normal" selected>Normal</option>
+          <option value="hard">Hard</option>
+        </select>
+      </div>
+      <button class="menu-action-btn" onclick="resetProgress()">🗑 RESET PROGRESS</button>
+      <button class="menu-action-btn" onclick="closeSettings()">✕ CLOSE</button>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
