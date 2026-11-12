@@ -160,6 +160,8 @@ class Player {
     this.vx = 0; this.vy = 0;
     this.w = 22; this.h = 64;
     this.onGround = false;
+    this.jumpCount = 0;
+    this.maxJumps  = 2;
 
     this.joints  = this._buildJoints();
     this.isAiming = false;
@@ -200,12 +202,23 @@ class Player {
   }
 
   jump() {
-    if (!this.onGround || this.stamina < 5 || this.isDead) return;
-    this.vy = -13.5;
-    this.stamina -= 5;
-    this.onGround = false;
-    spawnParticles(this.x, this.y + this.h/2, '#60a5fa', 4);
-    playSound('jump');
+    if (this.isDead || this.stamina < 5) return;
+    if (this.onGround) {
+      this.jumpCount = 1;
+      this.vy = -13.5;
+      this.stamina -= 5;
+      this.onGround = false;
+      spawnParticles(this.x, this.y + this.h/2, '#60a5fa', 5);
+      playSound('jump');
+    } else if (this.jumpCount < this.maxJumps) {
+      this.jumpCount = this.maxJumps;
+      this.vy = -12.5;
+      this.stamina -= 5;
+      spawnParticles(this.x, this.y + this.h/2, '#38bdf8', 10);
+      spawnParticles(this.x, this.y + this.h/2 - 8, '#ffffff', 6);
+      floatText(this.x, this.y - 45, 'DOUBLE JUMP!', '#38bdf8', 12);
+      playSound('doublejump');
+    }
   }
 
   takeDamage(amount, srcX, pierce) {
@@ -299,6 +312,7 @@ class Player {
           this.y = p.y - this.h/2;
           if (this.vy > 0) { this.vy *= -BOUNCE; if (Math.abs(this.vy)<1) this.vy=0; }
           this.onGround = true;
+          this.jumpCount = 0;
         }
       }
     }
@@ -550,6 +564,7 @@ class HordeEnemy {
           this.y = plat.y - this.h/2;
           if (this.vy>0) { this.vy*=-BOUNCE; if(Math.abs(this.vy)<1) this.vy=0; }
           this.onGround = true;
+          this.jumpCount = 0;
         }
       }
     }
@@ -2122,6 +2137,11 @@ function playSound(type){
         osc.frequency.exponentialRampToValueAtTime(480,now+0.12);
         gain.gain.setValueAtTime(0.08,now); gain.gain.exponentialRampToValueAtTime(0.001,now+0.12);
         osc.start(now); osc.stop(now+0.12); break;
+      case 'doublejump':
+        osc.type='triangle'; osc.frequency.setValueAtTime(320,now);
+        osc.frequency.exponentialRampToValueAtTime(640,now+0.14);
+        gain.gain.setValueAtTime(0.11,now); gain.gain.exponentialRampToValueAtTime(0.001,now+0.14);
+        osc.start(now); osc.stop(now+0.14); break;
       case 'death':
         osc.type='sawtooth'; osc.frequency.setValueAtTime(180,now);
         osc.frequency.exponentialRampToValueAtTime(25,now+0.7);
@@ -2886,9 +2906,9 @@ function setHint(){
   if(!hint) return;
   hint.style.color='';
   hint.textContent =
-    STATE.mode==='1player' ? 'A/D move • Space jump • Drag to aim, release to shoot • Q/E arrows • B shop • P pause' :
-    STATE.mode==='2player' ? 'P1: A/D + W  •  P2: ←/→ + ↑  •  Drag on your half to aim, release to shoot' :
-                             'A/D move • Space jump • Drag to aim, release to shoot • Q/E arrows • P pause';
+    STATE.mode==='1player' ? 'A/D move • Space jump (x2 double jump) • Drag to aim, release to shoot • Q/E arrows • B shop • P pause' :
+    STATE.mode==='2player' ? 'P1: A/D + W (x2 double jump)  •  P2: ←/→ + ↑  •  Drag on your half to aim, release to shoot' :
+                             'A/D move • Space jump (x2 double jump) • Drag to aim, release to shoot • Q/E arrows • P pause';
 }
 
 function revivePlayer(p){
