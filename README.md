@@ -2,6 +2,8 @@
 
 A thrilling stick figure archery battle game with ragdoll physics, upgrades, special arrows, and multiple game modes.
 
+🎮 **Play Live**: [https://ismail-lsdevmain.github.io/Ragdoll-Game-by-Mason/](https://ismail-lsdevmain.github.io/Ragdoll-Game-by-Mason/)
+
 ## Features
 - **1 Player**: Horde survival against waves of enemies
 - **Duel (PvP)**: 1v1 battle vs AI
@@ -11,5 +13,6 @@ A thrilling stick figure archery battle game with ragdoll physics, upgrades, spe
 - Upgrades, special arrows, stamina, and ragdoll physics engine
 
 ## How to Play
-Open `index.html` in any modern web browser or run with a local web server (e.g., Live Server or `npx serve`).
+- **Play in Browser**: Simply open the live link: [https://ismail-lsdevmain.github.io/Ragdoll-Game-by-Mason/](https://ismail-lsdevmain.github.io/Ragdoll-Game-by-Mason/)
+- **Run Locally**: Clone this repository and open `index.html` in any modern web browser or local web server.
 
