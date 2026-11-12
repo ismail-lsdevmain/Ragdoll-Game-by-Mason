@@ -2087,26 +2087,10 @@ const arrows = [];
 function shootArrow(player) {
   if (player.isDead) return false;
   let type  = player.selectedArrow || 'normal';
-  // Special arrows use limited ammo that respawns over time
-  let spent = null;
-  const isLocal = (STATE.mode === 'online' && netRole === 'guest') ? player === players[1] : player === players[0];
-  if (type !== 'normal' && isLocal) {
-    const sa = SPECIAL_ARROWS.find(a => a.id === type);
-    if (sa && sa.ammo === undefined) sa.ammo = ammoMax();
-    if (!sa || sa.ammo <= 0) {
-      floatText(player.x, player.y - 70, 'OUT OF AMMO', '#f87171', 13);
-      type = 'normal';
-    } else spent = sa;
-  }
-  // Arrow slots = extra arrows per shot (fan). Shooting costs stamina.
+
+  // Infinite arrows: all normal and special arrows have unlimited ammo
+  // Arrow slots = extra arrows per shot (fan)
   const count = (type === 'shot' ? 3 : 1) + (player.arrowSlots - 1);
-  const cost  = 6 + (count - 1) * 2 + (type === 'minigun' ? 6 : 0);
-  if (player.stamina < cost) {
-    floatText(player.x, player.y - 55, 'NO STAMINA', '#60a5fa', 13);
-    return false;
-  }
-  player.stamina -= cost;
-  if (spent) spent.ammo--;
 
   const bA = player.aimAngle, bD = 28, power = player.aimPower;
   const ox = player.x + Math.cos(bA)*bD, oy = (player.y-20) + Math.sin(bA)*bD;
@@ -2417,8 +2401,7 @@ function buildAmmoMenu() {
     const b = document.createElement('button');
     b.className = 'ammo-slot' + (s.id !== 'normal' && !s.unlocked ? ' locked' : '');
     b.dataset.id = s.id;
-    b.title = `${s.name} — ${s.desc}` + (s.unlocked === false ? ` (click to buy for ${s.cost} coins)` : '') +
-              (AMMO_GAP[s.id] ? ` (+1 ammo every ${AMMO_GAP[s.id]}s)` : '');
+    b.title = `${s.name} — ${s.desc}` + (s.unlocked === false ? ` (click to buy for ${s.cost} coins)` : ' (Infinite)');
     b.innerHTML = `<span class="ammo-emoji">${s.emoji}</span><span class="ammo-count">${s.unlocked === false ? '🔒' + s.cost : '∞'}</span><span class="ammo-fill"></span>`;
     b.onclick = () => {
       if (s.id !== 'normal' && !s.unlocked) {
@@ -2455,7 +2438,6 @@ function updateAmmoMenu() {
   // Pinned to the top centre of the screen, just under the health bars
   el.style.left = (W / 2) + 'px';
   el.style.top  = '76px';
-  const max = ammoMax();
   for (const b of el.children) {
     const id = b.dataset.id;
     const sel = id === 'normal' ? !p.selectedArrow : p.selectedArrow === id;
@@ -2463,10 +2445,10 @@ function updateAmmoMenu() {
     if (id === 'normal') continue;
     const a = SPECIAL_ARROWS.find(x => x.id === id);
     if (!a || !a.unlocked) continue;
-    const have = a.ammo === undefined ? max : a.ammo;
-    b.querySelector('.ammo-count').textContent = `${have}/${max}`;
-    b.classList.toggle('empty', have <= 0);
-    b.querySelector('.ammo-fill').style.width = (have >= max ? 100 : (a.ammoTimer || 0) / (AMMO_GAP[id] || 6) * 100) + '%';
+    b.querySelector('.ammo-count').textContent = '∞';
+    b.classList.remove('empty');
+    const fill = b.querySelector('.ammo-fill');
+    if (fill) fill.style.width = '100%';
   }
 }
 
