@@ -1072,6 +1072,7 @@ class Arrow {
 
   applyPlayerHit(target) {
     this.hit = true;
+    if (STATE.mode === 'online' && netRole === 'guest') return;
     const baseDmg = this.owner?.damage || 25;
     switch(this.type){
       case 'fire':
@@ -1117,6 +1118,21 @@ class Arrow {
     }
     spawnParticles(target.x, target.y-20, this.color, 6);
     playSound('hit');
+
+    if (STATE.mode === 'online' && netRole === 'host' && netConn && netConn.open) {
+      sendNetMessage({
+        type: 'hit',
+        targetIdx: target === players[0] ? 0 : 1,
+        x: this.x,
+        y: this.y,
+        damage: baseDmg,
+        arrowType: this.type,
+        p1Hp: players[0] ? players[0].hp : 0,
+        p1Shield: players[0] ? players[0].shield : 0,
+        p2Hp: players[1] ? players[1].hp : 0,
+        p2Shield: players[1] ? players[1].shield : 0
+      });
+    }
   }
 
   draw() {
@@ -2012,6 +2028,7 @@ function onPointerDown(e){
   if(STATE.paused||STATE.roundOver||STATE.shopOpen) return;
   let tp=players[0];
   if(STATE.mode==='2player') tp=pos.x<W/2?players[0]:players[1];
+  else if(STATE.mode==='online') tp = netRole==='guest' ? players[1] : players[0];
   if(tp&&!tp.isAI&&!tp.isDead){
     aimState={active:true,startX:pos.x,startY:pos.y,curX:pos.x,curY:pos.y,player:tp};
     tp.isAiming=true; tp.aimPower=0;
@@ -2029,13 +2046,25 @@ function onPointerMove(e){
   p.aimAngle=Math.atan2(-dy,-dx);
   p.facing=Math.cos(p.aimAngle)>=0?1:-1;
   p.aimPower=Math.min(p.maxPower,Math.sqrt(dx*dx+dy*dy)/10*p.pullSpeed);
+  if(STATE.mode==='online'&&netConn&&netConn.open){
+    sendNetAimThrottled(p.aimAngle, p.aimPower, p.facing);
+  }
 }
 
 function onPointerUp(e){
   if(!aimState.active) return;
   e.preventDefault();
   const p=aimState.player;
-  if(p&&p.isAiming&&p.aimPower>0.5&&!STATE.paused) shootArrow(p);
+  if(p&&p.isAiming&&p.aimPower>0.5&&!STATE.paused) {
+    shootArrow(p);
+    if(STATE.mode==='online'&&netConn&&netConn.open){
+      if(netRole==='host'){
+        sendNetMessage({ type:'hostShoot', angle:p.aimAngle, power:p.aimPower, arrowType:p.selectedArrow });
+      } else if(netRole==='guest'){
+        sendNetMessage({ type:'guestShoot', angle:p.aimAngle, power:p.aimPower, arrowType:p.selectedArrow });
+      }
+    }
+  }
   if(p){p.isAiming=false;p.aimPower=0;}
   aimState.active=false; aimState.player=null;
 }
@@ -2058,9 +2087,10 @@ const arrows = [];
 function shootArrow(player) {
   if (player.isDead) return false;
   let type  = player.selectedArrow || 'normal';
-  // Special arrows use limited ammo that respawns over time (player 1 only)
+  // Special arrows use limited ammo that respawns over time
   let spent = null;
-  if (type !== 'normal' && player === players[0]) {
+  const isLocal = (STATE.mode === 'online' && netRole === 'guest') ? player === players[1] : player === players[0];
+  if (type !== 'normal' && isLocal) {
     const sa = SPECIAL_ARROWS.find(a => a.id === type);
     if (sa && sa.ammo === undefined) sa.ammo = ammoMax();
     if (!sa || sa.ammo <= 0) {
@@ -2216,6 +2246,7 @@ function gameLoop(ts){
   if(!STATE.paused){
     if(!STATE.roundOver) update(dt); else updatePassive(dt);
   }
+  if(STATE.mode==='online') updateNetLoops(ts);
   render(ts/1000);
   animId=requestAnimationFrame(gameLoop);
 }
@@ -2278,6 +2309,31 @@ function applyKeyboardMovement(dt) {
   if (!STATE.running || STATE.paused || STATE.roundOver) return;
   const accel = 0.6 * dt;
   const twoP  = STATE.mode === '2player';
+  const online = STATE.mode === 'online';
+
+  if (online) {
+    if (netRole === 'host') {
+      const p = players[0];
+      if (p && !p.isDead) {
+        const L = keysHeld['a'] || keysHeld['arrowleft'];
+        const R = keysHeld['d'] || keysHeld['arrowright'];
+        if (L) p.vx -= accel;
+        if (R) p.vx += accel;
+        if (L || R) p.walkCycle += 0.18 * dt;
+      }
+    } else if (netRole === 'guest') {
+      const p2 = players[1];
+      if (p2 && !p2.isDead) {
+        const L = keysHeld['a'] || keysHeld['arrowleft'];
+        const R = keysHeld['d'] || keysHeld['arrowright'];
+        if (L) p2.vx -= accel;
+        if (R) p2.vx += accel;
+        if (L || R) p2.walkCycle += 0.18 * dt;
+        sendNetInputThrottled(p2.vx, p2.x, p2.walkCycle);
+      }
+    }
+    return;
+  }
 
   const p = players[0];
   if (p && !p.isDead) {
@@ -2746,12 +2802,28 @@ function end1v1Round(){
     const title=document.getElementById('round-result-title');
     const msg=document.getElementById('round-result-msg');
     const earned=document.getElementById('coins-earned-amount');
-    title.textContent=winner===0?'DRAW!':winner===1?'YOU WIN!':(STATE.mode==='2player'?'PLAYER 2 WINS!':'ENEMY WINS!');
-    title.style.color=winner===1?'var(--accent-green)':winner===2?'var(--accent-red)':'var(--accent-gold)';
+    if(STATE.mode==='online'){
+      const isWin = (winner===1&&netRole==='host') || (winner===2&&netRole==='guest');
+      title.textContent = winner===0 ? 'DRAW!' : isWin ? 'ROUND WON! 🏆' : 'ROUND LOST! 💀';
+      title.style.color = winner===0 ? 'var(--accent-gold)' : isWin ? 'var(--accent-green)' : 'var(--accent-red)';
+    } else {
+      title.textContent=winner===0?'DRAW!':winner===1?'YOU WIN!':(STATE.mode==='2player'?'PLAYER 2 WINS!':'ENEMY WINS!');
+      title.style.color=winner===1?'var(--accent-green)':winner===2?'var(--accent-red)':'var(--accent-gold)';
+    }
     msg.textContent=`Round ${STATE.round} of ${STATE.maxRounds}`;
     earned.textContent=winner===1?`+${coinsEarned} 💰 COINS`:'No coins';
-    document.getElementById('next-round-btn').textContent=
-      (STATE.p1Score>=3||STATE.p2Score>=3||STATE.round>=STATE.maxRounds)?'VIEW RESULTS':'NEXT ROUND ▶';
+    const isMatchOver = (STATE.p1Score>=3||STATE.p2Score>=3||STATE.round>=STATE.maxRounds);
+    document.getElementById('next-round-btn').textContent =
+      isMatchOver ? 'VIEW RESULTS' : (STATE.mode==='online'&&netRole==='guest') ? 'WAITING FOR HOST...' : 'NEXT ROUND ▶';
+    if(STATE.mode==='online' && netRole==='host' && netConn && netConn.open){
+      sendNetMessage({
+        type: 'roundEnd',
+        winner: winner,
+        p1Score: STATE.p1Score,
+        p2Score: STATE.p2Score,
+        round: STATE.round
+      });
+    }
     el.classList.remove('hidden');
     updateUpgradeUI();
   },1200);
@@ -2908,6 +2980,7 @@ function setHint(){
   hint.textContent =
     STATE.mode==='1player' ? 'A/D move • Space jump (x2 double jump) • Drag to aim, release to shoot • Q/E arrows • B shop • P pause' :
     STATE.mode==='2player' ? 'P1: A/D + W (x2 double jump)  •  P2: ←/→ + ↑  •  Drag on your half to aim, release to shoot' :
+    STATE.mode==='online'  ? (netRole==='guest' ? 'P2 (YOU): A/D move • Space jump (x2) • Drag anywhere to aim & shoot • Q/E arrows' : 'P1 (YOU): A/D move • Space jump (x2) • Drag anywhere to aim & shoot • Q/E arrows') :
                              'A/D move • Space jump (x2 double jump) • Drag to aim, release to shoot • Q/E arrows • P pause';
 }
 
@@ -2943,10 +3016,17 @@ function startGame(mode){
   document.getElementById('game-screen').classList.add('active');
 
   const horde = mode==='1player';
-  document.getElementById('p2-jump-btn').style.display=mode==='2player'?'block':'none';
+  const isOnline = mode==='online';
+  document.getElementById('online-ping-pill')?.classList.toggle('hidden', !isOnline);
+  document.getElementById('p2-jump-btn').style.display=(mode==='2player'||(isOnline&&netRole==='guest'))?'block':'none';
   document.querySelectorAll('#p2-hud .bar-wrap').forEach(el=>{ el.style.display=horde?'none':''; });
-  document.querySelector('#p1-hud .hud-name').textContent = horde ? 'ARCHER' : 'PLAYER 1';
-  document.getElementById('p2-name').textContent = horde ? `💰 ${STATE.coins}` : mode==='2player' ? 'PLAYER 2' : 'AI ARCHER';
+  if(isOnline){
+    document.querySelector('#p1-hud .hud-name').textContent = netRole === 'host' ? 'YOU (P1)' : 'OPPONENT (P1)';
+    document.getElementById('p2-name').textContent = netRole === 'guest' ? 'YOU (P2)' : 'OPPONENT (P2)';
+  } else {
+    document.querySelector('#p1-hud .hud-name').textContent = horde ? 'ARCHER' : 'PLAYER 1';
+    document.getElementById('p2-name').textContent = horde ? `💰 ${STATE.coins}` : mode==='2player' ? 'PLAYER 2' : 'AI ARCHER';
+  }
   document.getElementById('p1-score').textContent='0';
   document.getElementById('p2-score').textContent='0';
   document.getElementById('round-display').textContent = horde ? 'WAVE 1' : 'ROUND 1';
@@ -2967,17 +3047,19 @@ function startGame(mode){
     setTimeout(()=>{ if(runId===STATE.runId&&STATE.running) startWave(1); }, 800);
   } else {
     players=[
-      new Player(platforms[1].x+platforms[1].w/2, platforms[1].y-32, p1Color,1,'PLAYER 1'),
-      new Player(platforms[2].x+platforms[2].w/2, platforms[2].y-32,'#6bb8ff',-1, mode==='2player'?'PLAYER 2':'AI ARCHER'),
+      new Player(platforms[1].x+platforms[1].w/2, platforms[1].y-32, p1Color,1, isOnline ? (netRole==='host'?'YOU':'OPPONENT') : 'PLAYER 1'),
+      new Player(platforms[2].x+platforms[2].w/2, platforms[2].y-32,'#6bb8ff',-1, isOnline ? (netRole==='guest'?'YOU':'OPPONENT') : (mode==='2player'?'PLAYER 2':'AI ARCHER')),
     ];
     players[0].applyUpgrades(UPGRADES.p1);
+    if(isOnline) players[1].applyUpgrades(UPGRADES.p1);
     simpleAI = mode==='pvp' ? new SimpleAI(players[1],players[0]) : null;
   }
 
   // Selected arrow
   const sel=SPECIAL_ARROWS.find(a=>a.selected);
   document.getElementById('p1-special-display').textContent = sel ? sel.emoji : '';
-  if(sel&&players[0]) players[0].selectedArrow=sel.id;
+  const myP = (isOnline && netRole==='guest') ? players[1] : players[0];
+  if(sel&&myP) myP.selectedArrow=sel.id;
 
   STATE.running=true; lastTime=performance.now();
   if(animId) cancelAnimationFrame(animId);
@@ -2987,8 +3069,27 @@ function startGame(mode){
   if(document.activeElement && document.activeElement.blur) document.activeElement.blur();
 }
 
-function player1Jump(){ if(!STATE.running||STATE.paused) return; players[0]?.jump(); }
-function player2Jump(){ if(!STATE.running||STATE.paused) return; if(STATE.mode==='2player') players[1]?.jump(); }
+function player1Jump(){
+  if(!STATE.running||STATE.paused) return;
+  if(STATE.mode === 'online'){
+    if(netRole === 'host') {
+      players[0]?.jump();
+    } else if(netRole === 'guest') {
+      players[1]?.jump();
+      if(netConn && netConn.open) sendNetMessage({ type: 'jump' });
+    }
+  } else {
+    players[0]?.jump();
+  }
+}
+function player2Jump(){
+  if(!STATE.running||STATE.paused) return;
+  if(STATE.mode==='2player') players[1]?.jump();
+  else if(STATE.mode==='online' && netRole==='guest') {
+    players[1]?.jump();
+    if(netConn && netConn.open) sendNetMessage({ type: 'jump' });
+  }
+}
 
 function showPause(){
   if(!STATE.running || STATE.shopOpen || defencePlacementMode) return;
@@ -3044,9 +3145,13 @@ function nextRound(){
     if(STATE.p1Score>=3||STATE.p2Score>=3||STATE.round>=STATE.maxRounds){
       showGameOver(); return;
     }
+    if(STATE.mode==='online' && netRole==='guest') return;
     document.getElementById('round-over').classList.add('hidden');
     STATE.round++; document.getElementById('round-display').textContent=`ROUND ${STATE.round}`;
     init1v1Round();
+    if(STATE.mode==='online' && netRole==='host' && netConn && netConn.open){
+      sendNetMessage({ type: 'nextRound', round: STATE.round });
+    }
   }
 }
 
@@ -3094,10 +3199,12 @@ function showGameOver(){
   const title=document.getElementById('gameover-title');
   const msg=document.getElementById('gameover-msg');
   const score=document.getElementById('final-score-display');
-  if(STATE.p1Score>STATE.p2Score){
+  const youWon = (STATE.mode==='online' && netRole==='guest') ? (STATE.p2Score > STATE.p1Score) : (STATE.p1Score > STATE.p2Score);
+  const tie = STATE.p1Score === STATE.p2Score;
+  if(youWon){
     title.textContent='🏆 VICTORY!'; title.style.color='var(--accent-gold)';
     msg.textContent='You defeated your opponent!';
-  } else if(STATE.p1Score<STATE.p2Score){
+  } else if(!tie){
     title.textContent='DEFEATED'; title.style.color='var(--accent-red)';
     msg.textContent='Better luck next time!';
   } else {
@@ -3115,12 +3222,16 @@ function backToMenu(){
   defencePlacementMode=null; shopPausedGame=false;
   stopMusic();
   if(animId) cancelAnimationFrame(animId);
-  ['pause-screen','round-over','game-over','upgrades-panel'].forEach(id=>{
-    document.getElementById(id).classList.add('hidden');
+  ['pause-screen','round-over','game-over','upgrades-panel','online-screen'].forEach(id=>{
+    document.getElementById(id)?.classList.add('hidden');
   });
+  document.getElementById('online-ping-pill')?.classList.add('hidden');
   document.getElementById('game-screen').classList.remove('active');
   document.getElementById('main-menu').classList.add('active');
   enemies.length=0; waveSpawnQueue.length=0; waveActive=false;
+  if(netConn){ try { netConn.close(); } catch(e){} netConn=null; }
+  if(netPeer){ try { netPeer.destroy(); } catch(e){} netPeer=null; }
+  netRole=null;
   saveProgress();
   updateBestLine();
 }
@@ -3320,7 +3431,7 @@ function updateBestLine(){
 }
 
 function cycleArrow(dir){
-  const p=players[0];
+  const p = (STATE.mode==='online' && netRole==='guest') ? players[1] : players[0];
   if(!p) return;
   const list=[null,...SPECIAL_ARROWS.filter(a=>a.unlocked).map(a=>a.id)];
   if(list.length<2) return;
@@ -3330,8 +3441,13 @@ function cycleArrow(dir){
   SPECIAL_ARROWS.forEach(a=>{ a.selected=(a.id===id); });
   p.selectedArrow=id;
   const a=SPECIAL_ARROWS.find(x=>x.id===id);
-  document.getElementById('p1-special-display').textContent=a?a.emoji:'';
+  const disp = (STATE.mode==='online' && netRole==='guest') ? 'p2-special-display' : 'p1-special-display';
+  const el = document.getElementById(disp);
+  if(el) el.textContent=a?a.emoji:'';
   floatText(p.x,p.y-60,a?a.name:'NORMAL','#e8d5a3',12);
+  if(STATE.mode==='online' && netConn && netConn.open){
+    sendNetMessage({ type: 'selectArrow', id: id });
+  }
   saveProgress();
 }
 
@@ -3347,3 +3463,458 @@ bindHold('btn-right','d');
 buildSpecialArrowsUI();
 updateUpgradeUI();
 updateBestLine();
+
+// ============================================================
+// ONLINE DUEL MULTIPLAYER (WEBRTC PEER-TO-PEER VIA PEERJS)
+// Pure static client-side P2P: No server needed!
+// ============================================================
+
+let netRole = null;       // 'host' | 'guest' | null
+let netPeer = null;       // PeerJS instance
+let netConn = null;       // DataConnection to peer
+let netRoomCode = null;   // 5-character room code, e.g. "8K49P"
+let netPing = 0;          // Latency in ms
+let lastNetSync = 0;
+let lastPingSent = 0;
+let lastAimSent = 0;
+let lastInputSent = 0;
+
+function showOnlineScreen(){
+  document.getElementById('online-screen')?.classList.remove('hidden');
+  switchOnlineTab('host');
+}
+
+function closeOnlineScreen(){
+  document.getElementById('online-screen')?.classList.add('hidden');
+  if(!STATE.running){
+    if(netConn){ try{ netConn.close(); }catch(e){} netConn=null; }
+    if(netPeer){ try{ netPeer.destroy(); }catch(e){} netPeer=null; }
+    netRole=null;
+  }
+}
+
+function switchOnlineTab(tab){
+  const isHost = tab === 'host';
+  document.getElementById('tab-host')?.classList.toggle('active', isHost);
+  document.getElementById('tab-join')?.classList.toggle('active', !isHost);
+  document.getElementById('online-host-panel')?.classList.toggle('hidden', !isHost);
+  document.getElementById('online-join-panel')?.classList.toggle('hidden', isHost);
+
+  if(isHost){
+    if(!netPeer || netPeer.destroyed || netRole !== 'host'){
+      initHostPeer();
+    }
+  }
+}
+
+function copyHostCode(){
+  if(!netRoomCode) return;
+  copyText(netRoomCode, 'btn-copy-code', '📋 COPIED!');
+}
+
+function copyInviteLink(){
+  if(!netRoomCode) return;
+  const url = `${window.location.origin}${window.location.pathname}?room=${netRoomCode}`;
+  copyText(url, 'btn-copy-link', '🔗 LINK COPIED!');
+}
+
+function copyText(txt, btnId, successMsg){
+  const btn = document.getElementById(btnId);
+  const orig = btn ? btn.textContent : '';
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(()=>{
+      if(btn){ btn.textContent=successMsg; setTimeout(()=>btn.textContent=orig, 1800); }
+    }).catch(()=>fallbackCopy(txt, btn, orig, successMsg));
+  } else {
+    fallbackCopy(txt, btn, orig, successMsg);
+  }
+}
+
+function fallbackCopy(txt, btn, orig, successMsg){
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    if(btn){ btn.textContent=successMsg; setTimeout(()=>btn.textContent=orig, 1800); }
+  } catch(e){}
+}
+
+function updateHostStatus(status, text){
+  const dot = document.getElementById('host-status-dot');
+  const txt = document.getElementById('host-status-text');
+  if(dot){
+    dot.className = 'status-dot ' + (status === 'wait' ? 'pulse' : status === 'success' ? 'success' : 'error');
+  }
+  if(txt) txt.textContent = text;
+}
+
+function updateJoinStatus(status, text){
+  const dot = document.getElementById('join-status-dot');
+  const txt = document.getElementById('join-status-text');
+  if(dot){
+    dot.className = 'status-dot ' + (status === 'wait' ? 'pulse' : status === 'success' ? 'success' : 'error');
+  }
+  if(txt) txt.textContent = text;
+}
+
+function initHostPeer(){
+  if(typeof Peer === 'undefined'){
+    updateHostStatus('error', 'WebRTC peer library loading...');
+    setTimeout(initHostPeer, 600);
+    return;
+  }
+  if(netPeer && !netPeer.destroyed){ try{ netPeer.destroy(); }catch(e){} }
+  netRole = 'host';
+  netRoomCode = Math.random().toString(36).substring(2, 7).toUpperCase();
+  const fullPeerId = 'ragdoll-archer-' + netRoomCode;
+
+  const displayEl = document.getElementById('host-code-display');
+  if(displayEl) displayEl.textContent = netRoomCode;
+  updateHostStatus('wait', 'Registering room on P2P network...');
+
+  try {
+    netPeer = new Peer(fullPeerId, { debug: 0 });
+
+    netPeer.on('open', ()=>{
+      updateHostStatus('wait', `Waiting for opponent... (Code: ${netRoomCode})`);
+    });
+
+    netPeer.on('connection', conn => {
+      setupNetConnection(conn, 'host');
+    });
+
+    netPeer.on('error', err => {
+      if(err.type === 'unavailable-id'){
+        setTimeout(initHostPeer, 400);
+      } else {
+        updateHostStatus('error', 'Connection error: ' + (err.message || err.type));
+      }
+    });
+  } catch(err){
+    updateHostStatus('error', 'Failed to initialize peer: ' + err.message);
+  }
+}
+
+function joinOnlineRoom(){
+  if(typeof Peer === 'undefined'){
+    updateJoinStatus('error', 'WebRTC peer library loading...');
+    setTimeout(joinOnlineRoom, 600);
+    return;
+  }
+  const input = document.getElementById('join-code-input');
+  let code = (input ? input.value : '').trim().toUpperCase();
+  if(!code){
+    updateJoinStatus('error', 'Please enter a room code');
+    return;
+  }
+  if(code.includes('ROOM=')) code = code.split('ROOM=')[1].split('&')[0];
+  if(code.startsWith('RAGDOLL-ARCHER-')) code = code.replace('RAGDOLL-ARCHER-', '');
+  code = code.replace(/[^A-Z0-9]/g, '');
+
+  if(code.length < 3){
+    updateJoinStatus('error', 'Invalid room code');
+    return;
+  }
+
+  netRoomCode = code;
+  netRole = 'guest';
+  updateJoinStatus('wait', `Connecting to host (${code})...`);
+
+  if(netPeer && !netPeer.destroyed){ try{ netPeer.destroy(); }catch(e){} }
+
+  try {
+    netPeer = new Peer({ debug: 0 });
+
+    netPeer.on('open', ()=>{
+      const fullPeerId = 'ragdoll-archer-' + code;
+      const conn = netPeer.connect(fullPeerId, { reliable: true });
+      setupNetConnection(conn, 'guest');
+    });
+
+    netPeer.on('error', err => {
+      updateJoinStatus('error', 'Connection failed: ' + (err.message || err.type));
+    });
+  } catch(err){
+    updateJoinStatus('error', 'Join error: ' + err.message);
+  }
+}
+
+function setupNetConnection(conn, role){
+  netConn = conn;
+  netRole = role;
+
+  conn.on('open', ()=>{
+    if(role === 'host'){
+      updateHostStatus('success', 'Opponent connected! Launching duel...');
+      sendNetMessage({ type: 'hello', seed: Date.now() });
+      setTimeout(()=>{
+        document.getElementById('online-screen')?.classList.add('hidden');
+        startGame('online');
+      }, 400);
+    } else {
+      updateJoinStatus('success', 'Connected! Entering arena...');
+      sendNetMessage({ type: 'ready' });
+      setTimeout(()=>{
+        document.getElementById('online-screen')?.classList.add('hidden');
+        startGame('online');
+      }, 400);
+    }
+  });
+
+  conn.on('data', data => {
+    handleNetMessage(data);
+  });
+
+  conn.on('close', ()=>{
+    onPeerDisconnected();
+  });
+
+  conn.on('error', ()=>{
+    onPeerDisconnected();
+  });
+}
+
+function sendNetMessage(msg){
+  if(netConn && netConn.open){
+    try { netConn.send(msg); } catch(e){}
+  }
+}
+
+function sendNetAimThrottled(angle, power, facing){
+  const now = performance.now();
+  if(now - lastAimSent < 35) return;
+  lastAimSent = now;
+  sendNetMessage({ type: 'aim', angle, power, facing, isAiming: true });
+}
+
+function sendNetInputThrottled(vx, x, walkCycle){
+  const now = performance.now();
+  if(now - lastInputSent < 45) return;
+  lastInputSent = now;
+  sendNetMessage({ type: 'input', vx, x, walkCycle });
+}
+
+function handleNetMessage(data){
+  if(!data || !data.type) return;
+
+  switch(data.type){
+    case 'hello':
+      document.getElementById('online-screen')?.classList.add('hidden');
+      if(!STATE.running) startGame('online');
+      break;
+
+    case 'sync':
+      if(netRole === 'guest'){
+        const p1 = players[0], p2 = players[1];
+        if(p1 && data.p1){
+          if(Math.hypot(p1.x - data.p1.x, p1.y - data.p1.y) > 6){
+            p1.x += (data.p1.x - p1.x) * 0.45;
+            p1.y += (data.p1.y - p1.y) * 0.45;
+          }
+          p1.vx = data.p1.vx; p1.vy = data.p1.vy;
+          p1.hp = data.p1.hp; p1.shield = data.p1.shield; p1.stamina = data.p1.stamina;
+          p1.facing = data.p1.facing; p1.isAiming = data.p1.isAiming;
+          p1.aimAngle = data.p1.aimAngle; p1.aimPower = data.p1.aimPower;
+          p1.walkCycle = data.p1.walkCycle;
+          if(data.p1.isDead && !p1.isDead) p1.die();
+        }
+        if(p2 && data.p2){
+          p2.hp = data.p2.hp; p2.shield = data.p2.shield;
+          if(data.p2.isDead && !p2.isDead) p2.die();
+          if(Math.hypot(p2.x - data.p2.x, p2.y - data.p2.y) > 40){
+            p2.x += (data.p2.x - p2.x) * 0.3;
+          }
+        }
+        if(typeof data.p1Score === 'number') STATE.p1Score = data.p1Score;
+        if(typeof data.p2Score === 'number') STATE.p2Score = data.p2Score;
+        if(typeof data.round === 'number') STATE.round = data.round;
+        const s1 = document.getElementById('p1-score'); if(s1) s1.textContent = STATE.p1Score;
+        const s2 = document.getElementById('p2-score'); if(s2) s2.textContent = STATE.p2Score;
+      }
+      break;
+
+    case 'input':
+      if(netRole === 'host' && players[1]){
+        const p2 = players[1];
+        p2.vx = data.vx;
+        p2.walkCycle = data.walkCycle;
+        if(Math.abs(p2.x - data.x) > 25){
+          p2.x += (data.x - p2.x) * 0.35;
+        }
+      }
+      break;
+
+    case 'jump':
+      if(netRole === 'host' && players[1]){
+        players[1].jump();
+      }
+      break;
+
+    case 'aim':
+      if(netRole === 'host' && players[1]){
+        const p2 = players[1];
+        p2.aimAngle = data.angle;
+        p2.aimPower = data.power;
+        p2.facing = data.facing;
+        p2.isAiming = data.isAiming;
+      }
+      break;
+
+    case 'guestShoot':
+      if(netRole === 'host' && players[1]){
+        const p2 = players[1];
+        p2.selectedArrow = data.arrowType;
+        p2.aimAngle = data.angle;
+        p2.aimPower = data.power;
+        shootArrow(p2);
+      }
+      break;
+
+    case 'hostShoot':
+      if(netRole === 'guest' && players[0]){
+        const p1 = players[0];
+        p1.selectedArrow = data.arrowType;
+        p1.aimAngle = data.angle;
+        p1.aimPower = data.power;
+        shootArrow(p1);
+      }
+      break;
+
+    case 'hit':
+      if(netRole === 'guest'){
+        if(players[0]) { players[0].hp = data.p1Hp; players[0].shield = data.p1Shield; }
+        if(players[1]) { players[1].hp = data.p2Hp; players[1].shield = data.p2Shield; }
+        const tgt = data.targetIdx === 0 ? players[0] : players[1];
+        if(tgt){
+          showDamageText(data.x, data.y - 30, Math.round(data.damage), tgt.color);
+          spawnParticles(data.x, data.y - 20, '#ff6b6b', 6);
+          playSound('hit');
+        }
+      }
+      break;
+
+    case 'roundEnd':
+      if(netRole === 'guest'){
+        STATE.roundOver = true;
+        STATE.p1Score = data.p1Score;
+        STATE.p2Score = data.p2Score;
+        STATE.round = data.round;
+        const s1 = document.getElementById('p1-score'); if(s1) s1.textContent = STATE.p1Score;
+        const s2 = document.getElementById('p2-score'); if(s2) s2.textContent = STATE.p2Score;
+        const el = document.getElementById('round-over');
+        const title = document.getElementById('round-result-title');
+        const msg = document.getElementById('round-result-msg');
+        const isWin = data.winner === 2;
+        title.textContent = data.winner === 0 ? 'DRAW!' : isWin ? 'ROUND WON! 🏆' : 'ROUND LOST! 💀';
+        title.style.color = data.winner === 0 ? 'var(--accent-gold)' : isWin ? 'var(--accent-green)' : 'var(--accent-red)';
+        msg.textContent = `Round ${STATE.round} of ${STATE.maxRounds}`;
+        const isMatchOver = (STATE.p1Score >= 3 || STATE.p2Score >= 3 || STATE.round >= STATE.maxRounds);
+        document.getElementById('next-round-btn').textContent = isMatchOver ? 'VIEW RESULTS' : 'WAITING FOR HOST...';
+        el.classList.remove('hidden');
+      }
+      break;
+
+    case 'nextRound':
+      if(netRole === 'guest'){
+        document.getElementById('round-over')?.classList.add('hidden');
+        STATE.round = data.round;
+        const rd = document.getElementById('round-display');
+        if(rd) rd.textContent = `ROUND ${STATE.round}`;
+        init1v1Round();
+      }
+      break;
+
+    case 'selectArrow':
+      if(data.id !== undefined){
+        const p = netRole === 'host' ? players[1] : players[0];
+        if(p) p.selectedArrow = data.id;
+      }
+      break;
+
+    case 'ping':
+      sendNetMessage({ type: 'pong', t: data.t });
+      break;
+
+    case 'pong':
+      netPing = Math.max(1, Math.round(performance.now() - data.t));
+      updatePingUI(netPing);
+      sendNetMessage({ type: 'pingVal', ms: netPing });
+      break;
+
+    case 'pingVal':
+      updatePingUI(data.ms);
+      break;
+  }
+}
+
+function updatePingUI(ms){
+  const el = document.getElementById('online-ping-val');
+  if(el) el.textContent = `${ms} ms`;
+}
+
+function updateNetLoops(now){
+  if(STATE.mode !== 'online' || !netConn || !netConn.open) return;
+
+  if(netRole === 'host'){
+    if(now - lastNetSync > 50){
+      lastNetSync = now;
+      const p1 = players[0], p2 = players[1];
+      if(p1 && p2){
+        sendNetMessage({
+          type: 'sync',
+          p1: {
+            x: Math.round(p1.x*10)/10, y: Math.round(p1.y*10)/10,
+            vx: Math.round(p1.vx*10)/10, vy: Math.round(p1.vy*10)/10,
+            hp: p1.hp, shield: p1.shield, stamina: Math.round(p1.stamina),
+            isDead: p1.isDead, facing: p1.facing, isAiming: p1.isAiming,
+            aimAngle: p1.aimAngle, aimPower: p1.aimPower, walkCycle: p1.walkCycle
+          },
+          p2: {
+            x: Math.round(p2.x*10)/10, y: Math.round(p2.y*10)/10,
+            vx: Math.round(p2.vx*10)/10, vy: Math.round(p2.vy*10)/10,
+            hp: p2.hp, shield: p2.shield, stamina: Math.round(p2.stamina),
+            isDead: p2.isDead, facing: p2.facing, isAiming: p2.isAiming,
+            aimAngle: p2.aimAngle, aimPower: p2.aimPower, walkCycle: p2.walkCycle
+          },
+          p1Score: STATE.p1Score,
+          p2Score: STATE.p2Score,
+          round: STATE.round
+        });
+      }
+    }
+  }
+
+  if(netRole === 'host' && now - lastPingSent > 2000){
+    lastPingSent = now;
+    sendNetMessage({ type: 'ping', t: performance.now() });
+  }
+}
+
+function onPeerDisconnected(){
+  if(STATE.running && STATE.mode === 'online'){
+    floatText(W/2, H/2 - 40, 'OPPONENT DISCONNECTED', '#f87171', 16);
+    setTimeout(()=>{
+      alert('Opponent disconnected. Returning to main menu.');
+      backToMenu();
+    }, 1500);
+  }
+}
+
+// Auto-check URL invite params (?room=XYZ)
+window.addEventListener('DOMContentLoaded', ()=>{
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room') || params.get('join');
+    if(room){
+      showOnlineScreen();
+      switchOnlineTab('join');
+      const input = document.getElementById('join-code-input');
+      if(input) input.value = room.toUpperCase();
+      setTimeout(()=>{ joinOnlineRoom(); }, 350);
+    }
+  } catch(e){}
+});
