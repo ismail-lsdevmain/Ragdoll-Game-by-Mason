@@ -1255,6 +1255,47 @@ function drawParticles(){
 }
 
 // ============================================================
+// TARGET LOCK RETICLES (AUTO-AIM VISUAL FEEDBACK)
+// ============================================================
+
+const targetLocks = [];
+
+function spawnTargetLock(x, y) {
+  targetLocks.push({ x, y, radius: 26, life: 1.0, color: '#f5c842' });
+  spawnParticles(x, y, '#f5c842', 4);
+}
+
+function updateTargetLocks(dt) {
+  for (let i = targetLocks.length - 1; i >= 0; i--) {
+    const t = targetLocks[i];
+    t.life -= 0.05 * (dt || 1);
+    t.radius += 0.6 * (dt || 1);
+    if (t.life <= 0) targetLocks.splice(i, 1);
+  }
+}
+
+function drawTargetLocks() {
+  for (const t of targetLocks) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, t.life);
+    ctx.strokeStyle = t.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, t.radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const r = t.radius;
+    ctx.beginPath();
+    ctx.moveTo(t.x - r - 5, t.y); ctx.lineTo(t.x - r + 3, t.y);
+    ctx.moveTo(t.x + r - 3, t.y); ctx.lineTo(t.x + r + 5, t.y);
+    ctx.moveTo(t.x, t.y - r - 5); ctx.lineTo(t.x, t.y - r + 3);
+    ctx.moveTo(t.x, t.y + r - 3); ctx.lineTo(t.x, t.y + r + 5);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ============================================================
 // DAMAGE TEXT
 // ============================================================
 
@@ -2006,7 +2047,7 @@ function endHordeRound() {
 // AIMING INPUT
 // ============================================================
 
-let aimState = { active:false, startX:0, startY:0, curX:0, curY:0, player:null };
+let aimState = { active:false, startX:0, startY:0, curX:0, curY:0, player:null, hasDragged:false };
 let ghostPos = null;   // hover position while placing a defence
 
 function getEventPos(e,el){
@@ -2014,6 +2055,95 @@ function getEventPos(e,el){
   const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
   if (t) return {x:t.clientX-rect.left,y:t.clientY-rect.top};
   return {x:e.clientX-rect.left,y:e.clientY-rect.top};
+}
+
+function findTargetAt(pos, shooter) {
+  if (STATE.mode === '1player') {
+    // 1. Direct hit / near hit on any alive enemy (within 110px)
+    let best = null, bestDist = 110;
+    for (const e of enemies) {
+      if (e.isDead) continue;
+      const d = Math.hypot(e.x - pos.x, (e.y - 12 * (e.scale || 1)) - pos.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = e;
+      }
+    }
+    if (best) return best;
+
+    // 2. If clicking on the arena towards incoming enemies, lock onto closest alive enemy
+    if (shooter && pos.x > shooter.x - 30) {
+      let nearest = null, nearDist = 1e9;
+      for (const e of enemies) {
+        if (e.isDead) continue;
+        const d = Math.hypot(e.x - pos.x, e.y - pos.y);
+        if (d < nearDist) {
+          nearDist = d;
+          nearest = e;
+        }
+      }
+      if (nearest) return nearest;
+    }
+    return null;
+  }
+
+  // 1v1 PvP / Online / 2Player: target the opposing archer
+  if (STATE.mode === 'pvp' || STATE.mode === 'online' || STATE.mode === '2player') {
+    const opp = shooter === players[0] ? players[1] : players[0];
+    if (opp && !opp.isDead) {
+      const d = Math.hypot(opp.x - pos.x, opp.y - pos.y);
+      if (d < 160 || (shooter === players[0] && pos.x > W / 2) || (shooter === players[1] && pos.x < W / 2)) {
+        return opp;
+      }
+    }
+  }
+
+  return null;
+}
+
+function autoShootAtTarget(shooter, target, clickPos) {
+  if (!shooter || shooter.isDead) return false;
+
+  const v = shooter.maxPower;
+  const sx = shooter.x;
+  const sy = shooter.y - 20;
+
+  let tx, ty;
+  if (target) {
+    tx = target.x;
+    ty = target.y - 14 * (target.scale || 1);
+    // Lead moving target based on flight time
+    const adx = Math.abs(tx - sx);
+    const estFlight = adx / (v * 0.95);
+    const vx = target.vx || (target.facing ? target.facing * (target.speed || 1) : 0);
+    tx += vx * estFlight * 0.82;
+  } else if (clickPos) {
+    tx = clickPos.x;
+    ty = clickPos.y;
+  } else {
+    return false;
+  }
+
+  const angle = solveAimClear(sx, sy, tx, ty, v, 0);
+
+  shooter.facing = tx >= sx ? 1 : -1;
+  shooter.aimAngle = angle;
+  shooter.aimPower = v;
+  shooter.bowPull = 1;
+
+  spawnTargetLock(target ? target.x : tx, target ? (target.y - 14 * (target.scale || 1)) : ty);
+
+  shootArrow(shooter);
+
+  if (STATE.mode === 'online' && netConn && netConn.open) {
+    if (netRole === 'host') {
+      sendNetMessage({ type: 'hostShoot', angle: shooter.aimAngle, power: shooter.aimPower, arrowType: shooter.selectedArrow });
+    } else if (netRole === 'guest') {
+      sendNetMessage({ type: 'guestShoot', angle: shooter.aimAngle, power: shooter.aimPower, arrowType: shooter.selectedArrow });
+    }
+  }
+
+  return true;
 }
 
 function onPointerDown(e){
@@ -2029,10 +2159,18 @@ function onPointerDown(e){
   let tp=players[0];
   if(STATE.mode==='2player') tp=pos.x<W/2?players[0]:players[1];
   else if(STATE.mode==='online') tp = netRole==='guest' ? players[1] : players[0];
-  if(tp&&!tp.isAI&&!tp.isDead){
-    aimState={active:true,startX:pos.x,startY:pos.y,curX:pos.x,curY:pos.y,player:tp};
-    tp.isAiming=true; tp.aimPower=0;
+  if(!tp||tp.isAI||tp.isDead) return;
+
+  // Click on enemy / target: auto shoot with parabolic trajectory instantly!
+  const tgt = findTargetAt(pos, tp);
+  if (tgt) {
+    autoShootAtTarget(tp, tgt);
+    aimState.active = false;
+    return;
   }
+
+  aimState={active:true,startX:pos.x,startY:pos.y,curX:pos.x,curY:pos.y,player:tp,hasDragged:false};
+  tp.isAiming=true; tp.aimPower=0;
 }
 
 function onPointerMove(e){
@@ -2043,11 +2181,16 @@ function onPointerMove(e){
   const p=aimState.player;
   aimState.curX=pos.x; aimState.curY=pos.y;
   const dx=aimState.startX-pos.x, dy=aimState.startY-pos.y;
-  p.aimAngle=Math.atan2(-dy,-dx);
-  p.facing=Math.cos(p.aimAngle)>=0?1:-1;
-  p.aimPower=Math.min(p.maxPower,Math.sqrt(dx*dx+dy*dy)/10*p.pullSpeed);
-  if(STATE.mode==='online'&&netConn&&netConn.open){
-    sendNetAimThrottled(p.aimAngle, p.aimPower, p.facing);
+  const dist = Math.hypot(dx, dy);
+  if (dist > 12) aimState.hasDragged = true;
+
+  if (aimState.hasDragged) {
+    p.aimAngle=Math.atan2(-dy,-dx);
+    p.facing=Math.cos(p.aimAngle)>=0?1:-1;
+    p.aimPower=Math.min(p.maxPower,Math.sqrt(dx*dx+dy*dy)/10*p.pullSpeed);
+    if(STATE.mode==='online'&&netConn&&netConn.open){
+      sendNetAimThrottled(p.aimAngle, p.aimPower, p.facing);
+    }
   }
 }
 
@@ -2055,7 +2198,13 @@ function onPointerUp(e){
   if(!aimState.active) return;
   e.preventDefault();
   const p=aimState.player;
-  if(p&&p.isAiming&&p.aimPower>0.5&&!STATE.paused) {
+  const pos=getEventPos(e,canvas);
+
+  if (!aimState.hasDragged) {
+    // Was a tap/click in open space: auto-shoot towards closest target or clicked point
+    const tgt = findTargetAt(pos, p);
+    autoShootAtTarget(p, tgt, pos);
+  } else if(p&&p.isAiming&&p.aimPower>0.5&&!STATE.paused) {
     shootArrow(p);
     if(STATE.mode==='online'&&netConn&&netConn.open){
       if(netRole==='host'){
@@ -2476,6 +2625,7 @@ function updatePassive(dt) {
   for (const e of enemies) e.update(dt);
   stepArrows(dt);
   updateParticles(dt);
+  updateTargetLocks(dt);
   updateDmgTexts(dt);
   tickScreenFx(dt);
 }
@@ -2487,6 +2637,7 @@ function update(dt){
   if(simpleAI) simpleAI.update(dt);
   stepArrows(dt);
   updateParticles(dt);
+  updateTargetLocks(dt);
   updateDmgTexts(dt);
   tickScreenFx(dt);
   // Update placed defences
@@ -2512,6 +2663,7 @@ function render(t){
   drawPlatforms();
   for (const d of placedDefences) d.draw();
   drawParticles();
+  drawTargetLocks();
   for(const a of arrows) a.draw();
   if(STATE.mode==='1player') for(const e of enemies) e.draw();
   for(const p of players) p.draw();
@@ -2960,10 +3112,10 @@ function setHint(){
   if(!hint) return;
   hint.style.color='';
   hint.textContent =
-    STATE.mode==='1player' ? 'A/D move • Space jump (x2 double jump) • Drag to aim, release to shoot • Q/E arrows • B shop • P pause' :
-    STATE.mode==='2player' ? 'P1: A/D + W (x2 double jump)  •  P2: ←/→ + ↑  •  Drag on your half to aim, release to shoot' :
-    STATE.mode==='online'  ? (netRole==='guest' ? 'P2 (YOU): A/D move • Space jump (x2) • Drag anywhere to aim & shoot • Q/E arrows' : 'P1 (YOU): A/D move • Space jump (x2) • Drag anywhere to aim & shoot • Q/E arrows') :
-                             'A/D move • Space jump (x2 double jump) • Drag to aim, release to shoot • Q/E arrows • P pause';
+    STATE.mode==='1player' ? 'A/D move • Space jump (x2) • 🎯 Click enemy to auto-shoot (or drag) • Q/E arrows • B shop • P pause' :
+    STATE.mode==='2player' ? 'P1: A/D + W (x2)  •  P2: ←/→ + ↑  •  Click opponent or drag to shoot' :
+    STATE.mode==='online'  ? (netRole==='guest' ? 'P2 (YOU): A/D move • Space jump (x2) • 🎯 Click opponent to auto-shoot • Q/E arrows' : 'P1 (YOU): A/D move • Space jump (x2) • 🎯 Click opponent to auto-shoot • Q/E arrows') :
+                             'A/D move • Space jump (x2) • 🎯 Click enemy to auto-shoot • Q/E arrows • P pause';
 }
 
 function revivePlayer(p){
