@@ -174,6 +174,12 @@ class Player {
     this.ragJoints = null;
     this.walkCycle = 0;
     this.bowPull   = 0;
+
+    // Online: the remote opponent isn't physics-simulated here; it eases toward
+    // the last position the network told us about.
+    this.remote = false;
+    this.netX   = null;
+    this.netY   = null;
   }
 
   _buildJoints() {
@@ -272,7 +278,7 @@ class Player {
     playSound('death');
     if (this === players[0]) shake = 12;
     // Only the horde mode ends on the player's death; duels are handled by end1v1Round()
-    if (STATE.mode === '1player' && !STATE.roundOver) endHordeRound(false);
+    if (STATE.mode === '1player' && !STATE.roundOver) endHordeRound();
   }
 
   addEffect(type, duration, value) {
@@ -298,6 +304,21 @@ class Player {
       }
       return e.timer < e.duration;
     });
+
+    if (this.remote) {
+      if (this.netX !== null && this.netY !== null) {
+        if (Math.hypot(this.netX - this.x, this.netY - this.y) > 150) {
+          this.x = this.netX; this.y = this.netY;          // big jump (teleport / new round)
+        } else {
+          const k = Math.min(1, 0.35 * dt);
+          this.x += (this.netX - this.x) * k;
+          this.y += (this.netY - this.y) * k;
+        }
+      }
+      this.vx = 0; this.vy = 0;
+      this.bowPull = this.isAiming ? this.aimPower / this.maxPower : 0;
+      return;
+    }
 
     this.vy += GRAVITY * dt;
     this.x  += this.vx * dt;
@@ -1109,6 +1130,7 @@ class Arrow {
           const sp = spots[Math.floor(Math.random()*spots.length)];
           spawnParticles(target.x, target.y, '#8b5cf6', 12);
           target.x = sp.x + sp.w/2; target.y = sp.y - target.h/2 - 2; target.vx = 0; target.vy = 0;
+          target.netX = target.x; target.netY = target.y;
           spawnParticles(target.x, target.y, '#8b5cf6', 12);
         }
         break;
@@ -1127,6 +1149,8 @@ class Arrow {
         y: this.y,
         damage: baseDmg,
         arrowType: this.type,
+        tele: this.type === 'telescop',
+        px: target.x, py: target.y,
         p1Hp: players[0] ? players[0].hp : 0,
         p1Shield: players[0] ? players[0].shield : 0,
         p2Hp: players[1] ? players[1].hp : 0,
@@ -2462,7 +2486,7 @@ function applyKeyboardMovement(dt) {
         if (L) p2.vx -= accel;
         if (R) p2.vx += accel;
         if (L || R) p2.walkCycle += 0.18 * dt;
-        sendNetInputThrottled(p2.vx, p2.x, p2.walkCycle);
+        sendNetInputThrottled(p2.vx, p2.x, p2.walkCycle, p2.y);
       }
     }
     return;
@@ -2648,7 +2672,8 @@ function update(dt){
   updateHUD();
 
   // 1v1 end condition
-  if(STATE.mode!=='1player'){
+  // (the online guest waits for the host's 'roundEnd' instead of deciding locally)
+  if(STATE.mode!=='1player' && !(STATE.mode==='online' && netRole==='guest')){
     const p1=players[0],p2=players[1];
     if((p1?.isDead||p2?.isDead)&&!STATE.roundOver) end1v1Round();
   }
@@ -2972,6 +2997,7 @@ function init1v1Round(){
     p.hp=p.maxHp; p.stamina=p.maxStamina; p.shield=p.maxShield;
     p.isDead=false; p.ragdoll=false;
     p.vx=p.vy=0; p.isAiming=false; p.aimPower=0; p.effects=[];
+    p.netX=p.x; p.netY=p.y;
   });
 }
 
@@ -2993,13 +3019,16 @@ function solveAimClear(sx, sy, tx, ty, v, err) {
       if (Math.abs(x - sx) >= adx) return y - ty;
       if (y > H + 50) return null;
       for (const p of platforms) {
+        // Player arrows falling downward pass through the tower top (same rule as Arrow._step)
+        if (p.isTowerTop && vy > 0) continue;
         if (x > p.x && x < p.x + p.w && y >= p.y && y <= p.y + 10) return null;
       }
     }
     return null;
   };
   let prevTh = null, prevMiss = null, bestAbs = null;
-  for (let th = 0.9; th >= -1.4; th -= 0.025) {
+  // Start almost straight down (1.5 rad) so enemies right at the tower base are reachable
+  for (let th = 1.5; th >= -1.4; th -= 0.025) {
     const m = sim(th);
     if (m !== null) {
       if (!bestAbs || Math.abs(m) < bestAbs.s) bestAbs = { th, s: Math.abs(m) };
@@ -3185,7 +3214,11 @@ function startGame(mode){
       new Player(platforms[2].x+platforms[2].w/2, platforms[2].y-32,'#6bb8ff',-1, isOnline ? (netRole==='guest'?'YOU':'OPPONENT') : (mode==='2player'?'PLAYER 2':'AI ARCHER')),
     ];
     players[0].applyUpgrades(UPGRADES.p1);
-    if(isOnline) players[1].applyUpgrades(UPGRADES.p1);
+    if(isOnline){
+      players[1].applyUpgrades(UPGRADES.p1);
+      // Each side simulates only its own archer; the other one is driven by the network
+      players[netRole==='host' ? 1 : 0].remote = true;
+    }
     simpleAI = mode==='pvp' ? new SimpleAI(players[1],players[0]) : null;
   }
 
@@ -3461,14 +3494,25 @@ function selectArrow(id){
 // LEADERBOARD / SETTINGS
 // ============================================================
 
-function saveLeaderboard(score, wave){
-  const lb=JSON.parse(localStorage.getItem('ragdollArchersLB')||'[]');
-  lb.push({name:'Player',score,wave:wave||0,date:Date.now()});
-  lb.sort((a,b)=>b.score-a.score);
-  localStorage.setItem('ragdollArchersLB',JSON.stringify(lb.slice(0,10)));
+function escapeHTML(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-function loadLeaderboard(){ return JSON.parse(localStorage.getItem('ragdollArchersLB')||'[]'); }
+function loadLeaderboard(){
+  try {
+    const lb = JSON.parse(localStorage.getItem('ragdollArchersLB')||'[]');
+    return Array.isArray(lb) ? lb : [];
+  } catch(e){ return []; }
+}
+
+function saveLeaderboard(score, wave){
+  try {
+    const lb=loadLeaderboard();
+    lb.push({name:'Player',score,wave:wave||0,date:Date.now()});
+    lb.sort((a,b)=>b.score-a.score);
+    localStorage.setItem('ragdollArchersLB',JSON.stringify(lb.slice(0,10)));
+  } catch(e){}
+}
 
 function showLeaderboard(){
   const lb=loadLeaderboard();
@@ -3478,7 +3522,7 @@ function showLeaderboard(){
     :lb.map((e,i)=>{
         const rc=i===0?'gold':i===1?'silver':i===2?'bronze':'';
         const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1);
-        return `<div class="lb-row"><span class="lb-rank ${rc}">${medal}</span><span class="lb-name">${e.name}</span><span class="lb-score">${e.score} kills${e.wave?` · wave ${e.wave}`:''}</span></div>`;
+        return `<div class="lb-row"><span class="lb-rank ${rc}">${medal}</span><span class="lb-name">${escapeHTML(e.name)}</span><span class="lb-score">${escapeHTML(e.score)} kills${e.wave?` · wave ${escapeHTML(e.wave)}`:''}</span></div>`;
       }).join('');
   document.getElementById('leaderboard-screen').classList.remove('hidden');
 }
@@ -3538,7 +3582,7 @@ function loadProgress(){
     const raw=localStorage.getItem(SAVE_KEY);
     if(!raw) return;
     const d=JSON.parse(raw);
-    if(typeof d.coins==='number') STATE.coins=Math.max(d.coins, 10000);   // top up to 10,000
+    if(typeof d.coins==='number') STATE.coins=d.coins;
     if(d.upgrades) for(const k in UPGRADES.p1){
       if(typeof d.upgrades[k]==='number') UPGRADES.p1[k]=Math.min(d.upgrades[k], UPGRADE_COSTS[k].length);
     }
@@ -3695,6 +3739,8 @@ function updateJoinStatus(status, text){
   if(txt) txt.textContent = text;
 }
 
+let hostRetries = 0;
+
 function initHostPeer(){
   if(typeof Peer === 'undefined'){
     updateHostStatus('error', 'WebRTC peer library loading...');
@@ -3724,10 +3770,15 @@ function initHostPeer(){
     netPeer.on('error', err => {
       if(err.type === 'unavailable-id'){
         setTimeout(initHostPeer, 400);
+      } else if(hostRetries < 3 && !(netConn && netConn.open)){
+        hostRetries++;
+        updateHostStatus('wait', `Connection problem, retrying (${hostRetries}/3)...`);
+        setTimeout(initHostPeer, 1500);
       } else {
         updateHostStatus('error', 'Connection error: ' + (err.message || err.type));
       }
     });
+    netPeer.on('open', ()=>{ hostRetries = 0; });
   } catch(err){
     updateHostStatus('error', 'Failed to initialize peer: ' + err.message);
   }
@@ -3825,15 +3876,24 @@ function sendNetAimThrottled(angle, power, facing){
   sendNetMessage({ type: 'aim', angle, power, facing, isAiming: true });
 }
 
-function sendNetInputThrottled(vx, x, walkCycle){
+function sendNetInputThrottled(vx, x, walkCycle, y){
   const now = performance.now();
   if(now - lastInputSent < 45) return;
   lastInputSent = now;
-  sendNetMessage({ type: 'input', vx, x, walkCycle });
+  sendNetMessage({ type: 'input', vx, x, y, walkCycle });
+}
+
+// Peer data is untrusted: coerce to a finite number within [lo, hi], else use the fallback.
+function nv(v, fallback, lo, hi){
+  if(typeof v !== 'number' || !Number.isFinite(v)) return fallback;
+  return Math.min(hi, Math.max(lo, v));
+}
+function validArrowType(t){
+  return t === null || t === 'normal' || SPECIAL_ARROWS.some(a => a.id === t) ? t : null;
 }
 
 function handleNetMessage(data){
-  if(!data || !data.type) return;
+  if(!data || typeof data !== 'object' || typeof data.type !== 'string') return;
 
   switch(data.type){
     case 'hello':
@@ -3844,28 +3904,33 @@ function handleNetMessage(data){
     case 'sync':
       if(netRole === 'guest'){
         const p1 = players[0], p2 = players[1];
-        if(p1 && data.p1){
-          if(Math.hypot(p1.x - data.p1.x, p1.y - data.p1.y) > 6){
-            p1.x += (data.p1.x - p1.x) * 0.45;
-            p1.y += (data.p1.y - p1.y) * 0.45;
-          }
-          p1.vx = data.p1.vx; p1.vy = data.p1.vy;
-          p1.hp = data.p1.hp; p1.shield = data.p1.shield; p1.stamina = data.p1.stamina;
-          p1.facing = data.p1.facing; p1.isAiming = data.p1.isAiming;
-          p1.aimAngle = data.p1.aimAngle; p1.aimPower = data.p1.aimPower;
-          p1.walkCycle = data.p1.walkCycle;
-          if(data.p1.isDead && !p1.isDead) p1.die();
+        const d1 = data.p1 && typeof data.p1 === 'object' ? data.p1 : null;
+        const d2 = data.p2 && typeof data.p2 === 'object' ? data.p2 : null;
+        if(p1 && d1){
+          p1.netX = nv(d1.x, p1.x, -100, W + 100);
+          p1.netY = nv(d1.y, p1.y, -400, H + 200);
+          p1.hp = nv(d1.hp, p1.hp, 0, p1.maxHp);
+          p1.shield = nv(d1.shield, p1.shield, 0, p1.maxShield);
+          p1.stamina = nv(d1.stamina, p1.stamina, 0, p1.maxStamina);
+          p1.facing = d1.facing === -1 ? -1 : 1; p1.isAiming = !!d1.isAiming;
+          p1.aimAngle = nv(d1.aimAngle, p1.aimAngle, -10, 10);
+          p1.aimPower = nv(d1.aimPower, 0, 0, p1.maxPower);
+          p1.walkCycle = nv(d1.walkCycle, p1.walkCycle, -1e6, 1e6);
+          if(d1.isDead === true && !p1.isDead) p1.die();
         }
-        if(p2 && data.p2){
-          p2.hp = data.p2.hp; p2.shield = data.p2.shield;
-          if(data.p2.isDead && !p2.isDead) p2.die();
-          if(Math.hypot(p2.x - data.p2.x, p2.y - data.p2.y) > 40){
-            p2.x += (data.p2.x - p2.x) * 0.3;
+        if(p2 && d2){
+          p2.hp = nv(d2.hp, p2.hp, 0, p2.maxHp);
+          p2.shield = nv(d2.shield, p2.shield, 0, p2.maxShield);
+          if(d2.isDead === true && !p2.isDead) p2.die();
+          // Our own archer is client-authoritative; only snap if we're wildly out of step
+          const nx2 = nv(d2.x, p2.x, -100, W + 100), ny2 = nv(d2.y, p2.y, -400, H + 200);
+          if(Math.hypot(p2.x - nx2, p2.y - ny2) > 200){
+            p2.x = nx2; p2.y = ny2; p2.vx = 0; p2.vy = 0;
           }
         }
-        if(typeof data.p1Score === 'number') STATE.p1Score = data.p1Score;
-        if(typeof data.p2Score === 'number') STATE.p2Score = data.p2Score;
-        if(typeof data.round === 'number') STATE.round = data.round;
+        if(typeof data.p1Score === 'number') STATE.p1Score = nv(data.p1Score, STATE.p1Score, 0, 99);
+        if(typeof data.p2Score === 'number') STATE.p2Score = nv(data.p2Score, STATE.p2Score, 0, 99);
+        if(typeof data.round === 'number') STATE.round = nv(data.round, STATE.round, 1, STATE.maxRounds);
         const s1 = document.getElementById('p1-score'); if(s1) s1.textContent = STATE.p1Score;
         const s2 = document.getElementById('p2-score'); if(s2) s2.textContent = STATE.p2Score;
       }
@@ -3874,11 +3939,10 @@ function handleNetMessage(data){
     case 'input':
       if(netRole === 'host' && players[1]){
         const p2 = players[1];
-        p2.vx = data.vx;
-        p2.walkCycle = data.walkCycle;
-        if(Math.abs(p2.x - data.x) > 25){
-          p2.x += (data.x - p2.x) * 0.35;
-        }
+        // The guest is authoritative for its own movement; we just follow it smoothly.
+        p2.walkCycle = nv(data.walkCycle, p2.walkCycle, -1e6, 1e6);
+        p2.netX = nv(data.x, p2.netX !== null ? p2.netX : p2.x, -100, W + 100);
+        p2.netY = nv(data.y, p2.netY !== null ? p2.netY : p2.y, -400, H + 200);
       }
       break;
 
@@ -3891,19 +3955,19 @@ function handleNetMessage(data){
     case 'aim':
       if(netRole === 'host' && players[1]){
         const p2 = players[1];
-        p2.aimAngle = data.angle;
-        p2.aimPower = data.power;
-        p2.facing = data.facing;
-        p2.isAiming = data.isAiming;
+        p2.aimAngle = nv(data.angle, p2.aimAngle, -10, 10);
+        p2.aimPower = nv(data.power, 0, 0, p2.maxPower);
+        p2.facing = data.facing === -1 ? -1 : 1;
+        p2.isAiming = !!data.isAiming;
       }
       break;
 
     case 'guestShoot':
       if(netRole === 'host' && players[1]){
         const p2 = players[1];
-        p2.selectedArrow = data.arrowType;
-        p2.aimAngle = data.angle;
-        p2.aimPower = data.power;
+        p2.selectedArrow = validArrowType(data.arrowType);
+        p2.aimAngle = nv(data.angle, p2.aimAngle, -10, 10);
+        p2.aimPower = nv(data.power, 0, 0, p2.maxPower);
         shootArrow(p2);
       }
       break;
@@ -3911,21 +3975,30 @@ function handleNetMessage(data){
     case 'hostShoot':
       if(netRole === 'guest' && players[0]){
         const p1 = players[0];
-        p1.selectedArrow = data.arrowType;
-        p1.aimAngle = data.angle;
-        p1.aimPower = data.power;
+        p1.selectedArrow = validArrowType(data.arrowType);
+        p1.aimAngle = nv(data.angle, p1.aimAngle, -10, 10);
+        p1.aimPower = nv(data.power, 0, 0, p1.maxPower);
         shootArrow(p1);
       }
       break;
 
     case 'hit':
       if(netRole === 'guest'){
-        if(players[0]) { players[0].hp = data.p1Hp; players[0].shield = data.p1Shield; }
-        if(players[1]) { players[1].hp = data.p2Hp; players[1].shield = data.p2Shield; }
+        if(players[0]) { players[0].hp = nv(data.p1Hp, players[0].hp, 0, players[0].maxHp); players[0].shield = nv(data.p1Shield, players[0].shield, 0, players[0].maxShield); }
+        if(players[1]) { players[1].hp = nv(data.p2Hp, players[1].hp, 0, players[1].maxHp); players[1].shield = nv(data.p2Shield, players[1].shield, 0, players[1].maxShield); }
         const tgt = data.targetIdx === 0 ? players[0] : players[1];
         if(tgt){
-          showDamageText(data.x, data.y - 30, Math.round(data.damage), tgt.color);
-          spawnParticles(data.x, data.y - 20, '#ff6b6b', 6);
+          const hx = nv(data.x, tgt.x, -100, W + 100), hy = nv(data.y, tgt.y, -400, H + 200);
+          if(tgt === players[1]){                       // our own archer: apply knockback / teleport locally
+            if(data.tele === true){
+              tgt.x = nv(data.px, tgt.x, -100, W + 100); tgt.y = nv(data.py, tgt.y, -400, H + 200);
+              tgt.vx = 0; tgt.vy = 0;
+            } else {
+              tgt.vx += (tgt.x > hx ? 1 : -1) * 2.5; tgt.vy -= 2;
+            }
+          }
+          showDamageText(hx, hy - 30, Math.round(nv(data.damage, 0, 0, 999)), tgt.color);
+          spawnParticles(hx, hy - 20, '#ff6b6b', 6);
           playSound('hit');
         }
       }
@@ -3934,9 +4007,9 @@ function handleNetMessage(data){
     case 'roundEnd':
       if(netRole === 'guest'){
         STATE.roundOver = true;
-        STATE.p1Score = data.p1Score;
-        STATE.p2Score = data.p2Score;
-        STATE.round = data.round;
+        STATE.p1Score = nv(data.p1Score, STATE.p1Score, 0, 99);
+        STATE.p2Score = nv(data.p2Score, STATE.p2Score, 0, 99);
+        STATE.round = nv(data.round, STATE.round, 1, STATE.maxRounds);
         const s1 = document.getElementById('p1-score'); if(s1) s1.textContent = STATE.p1Score;
         const s2 = document.getElementById('p2-score'); if(s2) s2.textContent = STATE.p2Score;
         const el = document.getElementById('round-over');
@@ -3955,8 +4028,8 @@ function handleNetMessage(data){
     case 'nextRound':
       if(netRole === 'guest'){
         document.getElementById('round-over')?.classList.add('hidden');
-        STATE.round = data.round;
-        const rd = document.getElementById('round-display');
+        STATE.round = nv(data.round, STATE.round, 1, STATE.maxRounds);
+        const rd =document.getElementById('round-display');
         if(rd) rd.textContent = `ROUND ${STATE.round}`;
         init1v1Round();
       }
@@ -3965,22 +4038,23 @@ function handleNetMessage(data){
     case 'selectArrow':
       if(data.id !== undefined){
         const p = netRole === 'host' ? players[1] : players[0];
-        if(p) p.selectedArrow = data.id;
+        if(p) p.selectedArrow = validArrowType(data.id);
       }
       break;
 
     case 'ping':
-      sendNetMessage({ type: 'pong', t: data.t });
+      if(typeof data.t === 'number') sendNetMessage({ type: 'pong', t: data.t });
       break;
 
     case 'pong':
-      netPing = Math.max(1, Math.round(performance.now() - data.t));
+      if(typeof data.t !== 'number') break;
+      netPing = nv(Math.round(performance.now() - data.t), 1, 1, 9999);
       updatePingUI(netPing);
       sendNetMessage({ type: 'pingVal', ms: netPing });
       break;
 
     case 'pingVal':
-      updatePingUI(data.ms);
+      updatePingUI(nv(data.ms, 0, 0, 9999));
       break;
   }
 }
