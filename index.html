@@ -21,10 +21,10 @@
         <p class="subtitle">SEASON 3</p>
       </div>
       <div class="mode-buttons">
-        <button id="btn-1player" class="mode-btn" onclick="startGame('1player')">
-          <span class="mode-icon">🏹</span>
-          <span class="mode-label">1 PLAYER</span>
-          <span class="mode-desc">Horde survival</span>
+        <button id="btn-1player" class="mode-btn" onclick="showNightPicker()">
+          <span class="mode-icon">🌙</span>
+          <span class="mode-label">SURVIVE THE NIGHT</span>
+          <span class="mode-desc">1 player • horde survival</span>
         </button>
         <button id="btn-pvp" class="mode-btn pvp" onclick="startGame('pvp')">
           <span class="mode-icon">⚔️</span>
@@ -241,6 +241,19 @@
       </div>
       <button class="menu-action-btn" onclick="restartGame()">🔄 PLAY AGAIN</button>
       <button class="menu-action-btn" onclick="backToMenu()">🏠 MAIN MENU</button>
+    </div>
+  </div>
+
+  <!-- Survive the Night: choose the length of the night -->
+  <div id="night-screen" class="overlay hidden">
+    <div class="overlay-content">
+      <h2>🌙 SURVIVE THE NIGHT</h2>
+      <p>Hold your tower until dawn. How long is the night?</p>
+      <button class="menu-action-btn" onclick="pickNight(120)">⚡ 2 MIN — SPRINT</button>
+      <button class="menu-action-btn" onclick="pickNight(300)">🔥 5 MIN — STANDARD</button>
+      <button class="menu-action-btn" onclick="pickNight(600)">💀 10 MIN — HARD</button>
+      <button class="menu-action-btn" onclick="pickNight(900)">☠️ 15 MIN — ENDURANCE</button>
+      <button class="menu-action-btn" onclick="closeNightPicker()">✕ BACK</button>
     </div>
   </div>
 

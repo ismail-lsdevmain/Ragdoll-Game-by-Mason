@@ -489,6 +489,16 @@ const ENEMY_TYPES = {
   boss:   { hp:7,    dmg:1.2, speed:0.45, scale:1.8,  coin:25,  score:2500, ranged:true,  range:300, color:'#a855f7', triple:true },
 };
 
+// Every enemy carries its own kind of arrow: some fast, some slow, some with special effects.
+const ENEMY_ARROWS = {
+  standard: { name:'standard', speed:1.0,  dmg:1.0, cd:1.0, color:'#ff8a65' },
+  swift:    { name:'swift',    speed:1.6,  dmg:0.6, cd:0.8, color:'#22d3ee' },               // FAST, light
+  heavy:    { name:'heavy',    speed:0.72, dmg:1.7, cd:1.3, color:'#f59e0b', big:true },     // SLOW, hits hard
+  fire:     { name:'fire',     speed:1.0,  dmg:0.8, cd:1.1, color:'#f97316', burn:true },    // sets you on fire
+  frost:    { name:'frost',    speed:0.9,  dmg:0.7, cd:1.1, color:'#93c5fd', chill:true },   // drains stamina
+};
+const GRUNT_ARROW_POOL = ['standard','standard','swift','heavy','fire','frost'];
+
 class HordeEnemy {
   constructor(x, y, facing, waveNum, type, hasShield) {
     type = type || 'grunt';
@@ -527,16 +537,23 @@ class HordeEnemy {
     this.maxShield = hasShield ? Math.round((25 + waveNum * 8) * (type === 'boss' ? 3 : 1)) : 0;
     this.shield    = this.maxShield;
 
-    // Ranged AI (every time value is in SECONDS)
-    this.shootTimer    = 1.5 + Math.random() * 2.5;
-    this.shootCooldown = Math.max(2.4, 4.2 + Math.random()*2.2 - waveNum*0.08);
+    // Arrow kind: runners fire fast arrows, tanks fire slow heavy ones, everyone else is random
+    const kindName = type === 'runner' ? 'swift'
+                   : type === 'tank'   ? 'heavy'
+                   : type === 'boss'   ? (Math.random() < 0.5 ? 'fire' : 'heavy')
+                   : GRUNT_ARROW_POOL[Math.floor(Math.random() * GRUNT_ARROW_POOL.length)];
+    this.kdef = ENEMY_ARROWS[kindName];
+
+    // Ranged AI (every time value is in SECONDS). Everyone starts shooting almost the moment they spawn.
+    this.shootTimer    = 0.3 + Math.random() * 1.2;
+    this.shootCooldown = Math.max(2.6, 4.2 + Math.random()*2.2 - waveNum*0.08) * this.kdef.cd;
     this.aimTime       = Math.max(0.8, 1.5 + Math.random()*0.7 - waveNum*0.04);
     this.stopRange     = (T.range || 200) + Math.random()*70;
     this.aimSpread     = ({ easy:0.30, normal:0.20, hard:0.12 }[STATE.difficulty] || 0.2) * Math.max(0.5, 1 - waveNum*0.02);
     this.aimError      = 0;
     this.aimAngle      = 0;
     this.aimPower      = 0;
-    this.maxPower      = 13 + Math.min(waveNum, 12) * 0.4;
+    this.maxPower      = (15 + Math.min(waveNum, 12) * 0.4) * this.kdef.speed;
     this.isAiming      = false;
     this.aimDuration   = 0;
 
@@ -609,6 +626,16 @@ class HordeEnemy {
     const dx  = p.x - this.x;
     const adx = Math.abs(dx);
 
+    // --- MELEE types (runner/tank) also fire arrows on the move, from the moment they spawn ---
+    if (this.melee) {
+      this.shootTimer -= sec;
+      if (this.shootTimer <= 0) {
+        this.aimAngle = solveAim(this.x, this.y - 20, p.x, p.y - 8, this.maxPower, (Math.random() - 0.5) * this.aimSpread * 1.5);
+        this._shoot();
+        this.shootTimer = this.shootCooldown * 1.2;
+      }
+    }
+
     // --- MELEE: run to the tower base and smash it ---
     if (this.melee) {
       const tx   = towerData ? towerData.x + towerData.w/2 : p.x;
@@ -624,7 +651,7 @@ class HordeEnemy {
         if (this.atkTimer >= 1.1) {
           this.atkTimer = 0;
           this.swing = 0.3;
-          damageTower(this.damage * 0.6);
+          damageTower(this.damage * 0.35);   // lower per hit: there are many more of them now
         }
       }
       return;
@@ -638,13 +665,14 @@ class HordeEnemy {
       this.isAiming = false; this.bowPull = 0;
       if (adx > this.stopRange && this.onGround) this.vx += this.facing * spd * 0.8;
       this.shootTimer -= sec;
-      if (this.shootTimer <= 0 && adx < this.stopRange + 80) {
+      if (this.shootTimer <= 0) {            // no range requirement: fire the moment the timer is up
         this.state = 'aim';
         this.aimDuration = 0;
         this.aimError = (Math.random() - 0.5) * this.aimSpread;
       }
     } else {
       this.aimDuration += sec;
+      if (adx > this.stopRange && this.onGround) this.vx += this.facing * spd * 0.5;   // keep closing in while drawing the bow
       const frac = Math.min(1, this.aimDuration / this.aimTime);
       this.aimPower = this.maxPower * frac;
       this.bowPull  = frac;
@@ -667,7 +695,10 @@ class HordeEnemy {
       const a = this.aimAngle + off;
       const bowX = this.x + Math.cos(a)*28*this.scale;
       const bowY = (this.y-20) + Math.sin(a)*28*this.scale;
-      arrows.push(new Arrow(bowX, bowY, a, this.maxPower, this, 'normal', true));
+      const ar = new Arrow(bowX, bowY, a, this.maxPower, this, 'normal', true);
+      ar.kdef  = this.kdef;
+      ar.color = this.kdef.color;
+      arrows.push(ar);
     }
     this.vx -= Math.cos(this.aimAngle)*1.2;
     spawnParticles(this.x + Math.cos(this.aimAngle)*28, this.y - 20 + Math.sin(this.aimAngle)*28, '#f5c842', 3);
@@ -750,7 +781,7 @@ class HordeEnemy {
     STATE.comboTimer = 4;
     STATE.bestCombo = Math.max(STATE.bestCombo, STATE.combo);
     const mult  = 1 + Math.min(STATE.combo - 1, 9) * 0.1;
-    const coins = Math.round((5 + STATE.wave * 2) * this.def.coin) + Math.floor(STATE.combo / 3);
+    const coins = Math.max(1, Math.round((5 + STATE.wave * 2) * this.def.coin * 0.5)) + Math.floor(STATE.combo / 3);   // more kills per wave, so less per kill
     STATE.coins += coins;
     STATE.score += Math.round(this.def.score * mult);
     floatText(this.x, this.y - 55*this.scale, '+' + coins + ' 💰', '#f5c842');
@@ -875,6 +906,10 @@ class HordeEnemy {
       ctx.fillStyle = '#22d3ee'; ctx.fillRect(this.x - 16, this.y - 50, 32 * sp, 3);
     }
 
+    // Arrow-type pip so you can read what each enemy is firing
+    ctx.fillStyle = this.kdef.color;
+    ctx.beginPath(); ctx.arc(this.x - 22, this.y - 42, 3.5, 0, Math.PI*2); ctx.fill();
+
     // Health bar above head
     const barW=32, barH=4;
     const bx=this.x-barW/2, by=this.y-44;
@@ -995,7 +1030,7 @@ class Arrow {
           this.x > towerData.x && this.x < towerData.x + towerData.w &&
           this.y > towerData.y + 6) {
         this.hit = true;
-        damageTower((this.owner && this.owner.damage || 10) * 0.25);
+        damageTower((this.owner && this.owner.damage || 10) * 0.25 * (this.kdef ? this.kdef.dmg : 1));
         spawnParticles(this.x, this.y, '#6b7bb8', 4);
       }
     } else {
@@ -1022,8 +1057,18 @@ class Arrow {
 
   _hitPlayer(p) {
     this.hit = true;
-    p.takeDamage(this.owner.damage || 12, this.owner.x || this.x);
-    spawnParticles(p.x, p.y-20, '#ff6b6b', 5);
+    const kd  = this.kdef;
+    const dmg = (this.owner.damage || 12) * (kd ? kd.dmg : 1);
+    p.takeDamage(dmg, this.owner.x || this.x);
+    if (kd && kd.burn && !p.isDead) {
+      p.addEffect('burn', 3, Math.max(1, Math.floor(dmg * 0.15)));
+      floatText(p.x, p.y - 70, '🔥 BURNING', '#f97316', 12);
+    }
+    if (kd && kd.chill && !p.isDead) {
+      p.stamina = Math.max(0, p.stamina - 30);
+      floatText(p.x, p.y - 70, '❄ CHILLED', '#93c5fd', 12);
+    }
+    spawnParticles(p.x, p.y-20, kd ? kd.color : '#ff6b6b', 5);
     playSound('hit');
   }
 
@@ -1176,6 +1221,7 @@ class Arrow {
 
     ctx.globalAlpha=1;
     ctx.translate(this.x,this.y); ctx.rotate(angle);
+    if (this.kdef && this.kdef.big) ctx.scale(1.6, 1.6);          // heavy arrows are visibly bigger
     ctx.strokeStyle=this.color; ctx.lineWidth=2.5;
     ctx.beginPath(); ctx.moveTo(-14,0); ctx.lineTo(8,0); ctx.stroke();
     ctx.fillStyle=this.color;
@@ -1912,50 +1958,134 @@ let waveSpawnTimer = 0;
 let waveClearDelay = 0;
 let waveActive     = false;
 
+const MAX_ALIVE = 45;   // spawns wait while this many enemies are on screen (keeps huge waves smooth)
+
+// Mix shifts toward fast melee rushers and heavy tanks as waves climb; archers stay a minority
 function pickEnemyType(n) {
   const r = Math.random();
-  if (n >= 4 && r < 0.14) return 'tank';
-  if (n >= 3 && r < 0.38) return 'runner';
+  const tank   = n >= 3 ? Math.min(0.22, 0.05 + n * 0.02) : 0;
+  const runner = Math.min(0.50, 0.30 + n * 0.03);
+  if (r < tank) return 'tank';
+  if (r < tank + runner) return 'runner';
   return 'grunt';
 }
 
-function startWave(waveNum) {
-  STATE.wave        = waveNum;
-  STATE.kills       = 0;
-  STATE.damageTaken = 0;
-  STATE.intermission = false;
-  waveActive     = true;
-  waveClearDelay = 0;
+// ============================================================
+// SURVIVE THE NIGHT: a timed, continuous horde. Hold the tower until dawn.
+// ============================================================
 
-  const boss = true;   // every wave has a boss
-  let count = Math.min(3 + (waveNum - 1) * 2, 22); // Wave 1=3, W2=5, W3=7 …
-  const types = [];
-  if (boss) { types.push('boss'); count = Math.max(3, Math.floor(count * 0.5)); }
-  for (let i = 0; i < count; i++) types.push(pickEnemyType(waveNum));
+let nightLenSec = 300;   // chosen on the menu: 120 / 300 / 600 / 900
+let night = { len: 300, elapsed: 0, nextSurge: 1, nextMinute: 60, nextBoss: 40, over: false };
 
-  waveSpawnQueue = [];
-  const gap = Math.max(0.45, 1.6 - waveNum * 0.06);   // seconds between spawns
-  types.forEach((type, i) => {
-    const fromLeft = Math.random() < 0.5;
-    waveSpawnQueue.push({
-      type,
-      x: fromLeft ? -40 : W + 40,
-      y: H - 25 - 30 * ENEMY_TYPES[type].scale - 4,   // feet just above the ground line
-      facing: fromLeft ? 1 : -1,
-      delay: 0.5 + i * gap,
-      shield: type === 'boss' || Math.random() < (type === 'tank' ? 0.6 : 0.3),   // boss always has one
-    });
-  });
+function fmtTime(s) {
+  s = Math.max(0, Math.ceil(s));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
 
-  waveSpawnTimer = 0;
-  updateWaveHUD(waveNum, types.length);
-  waveBanner = {
-    text: boss ? `BOSS WAVE ${waveNum}` : `WAVE ${waveNum}`,
-    sub:  boss ? 'A warlord approaches!' : `${types.length} enemies incoming`,
-    t: 0, boss,
-  };
+// Difficulty level climbs over the whole night, so a 2-minute night ramps as hard as a 15-minute one
+function nightLevel() {
+  const maxLevel = 8 + night.len / 60;                       // 2 min -> 10, 5 -> 13, 10 -> 18, 15 -> 23
+  return 1 + Math.floor(Math.min(1, night.elapsed / night.len) * (maxLevel - 1) * 0.999);
+}
+
+function startNight() {
+  night = { len: nightLenSec, elapsed: 0, nextSurge: 1, nextMinute: 60, nextBoss: 40, over: false };
+  STATE.wave = 1; STATE.kills = 0; STATE.damageTaken = 0; STATE.intermission = false;
+  waveActive = true; waveClearDelay = 0;
+  waveSpawnQueue = []; waveSpawnTimer = 0;
+  waveBanner = { text: 'SURVIVE THE NIGHT', sub: `Hold the tower until dawn — ${fmtTime(night.len)} on the clock`, t: 0, boss: true };
   playSound('horn');
-  document.getElementById('round-display').textContent = `WAVE ${waveNum}`;
+  document.getElementById('round-display').textContent = `NIGHT LV 1`;
+}
+function startWave() { startNight(); }   // legacy callers (restart buttons) all begin a fresh night
+
+function queueSurge(level) {
+  const size    = Math.min(4 + level, 16);
+  const spacing = Math.max(0.08, 0.22 - level * 0.01);
+  const both    = Math.random() < 0.35;
+  const side    = Math.random() < 0.5 ? -1 : 1;
+  const t0      = waveSpawnTimer + 0.1;
+  for (let j = 0; j < size; j++) {
+    const type = pickEnemyType(level);
+    waveSpawnQueue.push(makeSpawn(type, both ? (j % 2 ? 1 : -1) : side, t0 + j * spacing, j === 0));
+  }
+}
+
+function makeSpawn(type, side, delay, surgeStart) {
+  return {
+    type,
+    x: side < 0 ? -40 : W + 40,
+    y: H - 25 - 30 * ENEMY_TYPES[type].scale - 4,   // feet just above the ground line
+    facing: side < 0 ? 1 : -1,
+    delay,
+    shield: type === 'boss' || Math.random() < (type === 'tank' ? 0.6 : 0.3),
+    surgeStart,
+  };
+}
+
+function nightTick(sec) {
+  night.elapsed += sec;
+  const level = nightLevel();
+  if (level !== STATE.wave) {
+    STATE.wave = level;
+    document.getElementById('round-display').textContent = `NIGHT LV ${level}`;
+  }
+
+  // Passive repairs so a long night is survivable
+  if (STATE.towerHp < STATE.towerMax) STATE.towerHp = Math.min(STATE.towerMax, STATE.towerHp + 1.2 * sec);
+
+  // Surges: more and faster as the night goes on (skip while a big backlog is still queued)
+  if (night.elapsed >= night.nextSurge && waveSpawnQueue.length < 40) {
+    queueSurge(level);
+    night.nextSurge = night.elapsed + Math.max(1.8, 5.5 - level * 0.2);
+  }
+
+  // Warlords
+  if (night.elapsed >= night.nextBoss) {
+    const n = Math.min(1 + Math.floor(level / 8), 3);
+    for (let b = 0; b < n; b++) waveSpawnQueue.push(makeSpawn('boss', Math.random() < 0.5 ? -1 : 1, waveSpawnTimer + 0.2 + b * 0.8, b === 0));
+    night.nextBoss = night.elapsed + 50;
+    waveBanner = { text: 'WARLORD!', sub: 'A boss joins the assault', t: 1.7, boss: true };
+    playSound('horn'); shake = Math.max(shake, 8);
+  }
+
+  // Supplies every minute
+  if (night.elapsed >= night.nextMinute) {
+    night.nextMinute += 60;
+    const p = players[0];
+    if (p && !p.isDead) { p.hp = Math.min(p.maxHp, p.hp + Math.round(p.maxHp * 0.3)); p.shield = p.maxShield; }
+    STATE.towerHp = Math.min(STATE.towerMax, STATE.towerHp + Math.round(STATE.towerMax * 0.25));
+    floatText(W/2, H*0.3, '+ SUPPLIES: tower & health restored', '#4ade80', 15);
+    playSound('upgrade');
+  }
+
+  // Dawn
+  if (night.elapsed >= night.len && !night.over) endNightVictory();
+}
+
+function endNightVictory() {
+  night.over = true;
+  waveActive = false;
+  STATE.roundOver = true;
+  waveSpawnQueue.length = 0;
+  for (const e of enemies) if (!e.isDead) e.die();            // the sun burns the horde away
+  const bonus = Math.round(night.len / 60 * 100) + STATE.wave * 25 + (STATE.damageTaken === 0 ? 300 : 0);
+  STATE.coins += bonus;
+  STATE.score += bonus * 2;
+  STATE.bestWave = Math.max(STATE.bestWave, STATE.wave);
+  saveProgress();
+  saveLeaderboard(STATE.totalKills, STATE.wave);
+  shake = 10; playSound('upgrade');
+  const runId = STATE.runId;
+  setTimeout(() => {
+    if (runId !== STATE.runId || !STATE.running) return;
+    document.getElementById('gameover-title').textContent = '🌅 YOU SURVIVED THE NIGHT!';
+    document.getElementById('gameover-title').style.color = 'var(--accent-green)';
+    document.getElementById('gameover-msg').textContent =
+      `Dawn breaks after ${fmtTime(night.len)}. ${STATE.totalKills} enemies slain, best combo x${STATE.bestCombo}. +${bonus} 💰 bonus!`;
+    document.getElementById('final-score-display').textContent = `SCORE ${STATE.score} | LEVEL ${STATE.wave}`;
+    document.getElementById('game-over').classList.remove('hidden');
+  }, 1800);
 }
 
 function updateWave(dt) {
@@ -1971,12 +2101,21 @@ function updateWave(dt) {
 
   // Spawn queued enemies
   waveSpawnTimer += sec;
-  for (let i = waveSpawnQueue.length-1; i>=0; i--) {
-    const item = waveSpawnQueue[i];
-    if (waveSpawnTimer >= item.delay) {
-      enemies.push(new HordeEnemy(item.x, item.y, item.facing, STATE.wave, item.type, item.shield));
-      waveSpawnQueue.splice(i, 1);
-      spawnParticles(item.x < 0 ? 0 : W, item.y, '#ff6b6b', 8);
+  nightTick(sec);
+  let aliveNow = 0;
+  for (const e of enemies) if (!e.isDead) aliveNow++;
+  // Queue is sorted so the next enemy to spawn is last; hold back while the screen is full
+  while (waveSpawnQueue.length && aliveNow < MAX_ALIVE) {
+    const item = waveSpawnQueue[waveSpawnQueue.length - 1];
+    if (waveSpawnTimer < item.delay) break;
+    waveSpawnQueue.pop();
+    enemies.push(new HordeEnemy(item.x, item.y, item.facing, STATE.wave, item.type, item.shield));
+    aliveNow++;
+    spawnParticles(item.x < 0 ? 0 : W, item.y, '#ff6b6b', 8);
+    if (item.surgeStart && item.surgeIdx > 0) {          // announce each new surge
+      shake = Math.max(shake, 6);
+      playSound('horn');
+      waveBanner = { text: 'SURGE!', sub: item.type === 'boss' ? 'A warlord leads the charge!' : 'Another pack is charging in!', t: 1.7, boss: item.type === 'boss' };
     }
   }
 
@@ -1988,22 +2127,7 @@ function updateWave(dt) {
     if (enemies[i].isDead && !enemies[i].ragdoll) enemies.splice(i,1);
   }
 
-  // Check if wave is cleared
-  const alive = enemies.filter(e => !e.isDead).length;
-  if (alive === 0 && waveSpawnQueue.length === 0 && !STATE.roundOver) {
-    waveClearDelay += sec;
-    if (waveClearDelay > 2.2) {
-      waveActive = false;
-      const flawless = STATE.damageTaken === 0;
-      let coinsEarned = 15 + STATE.wave * 10;
-      if (flawless) coinsEarned += Math.round(coinsEarned * 0.5);
-      STATE.coins += coinsEarned;
-      STATE.score += STATE.wave * 250 + (flawless ? 500 : 0);
-      STATE.bestWave = Math.max(STATE.bestWave, STATE.wave);
-      saveProgress();
-      showWaveClearScreen(coinsEarned, flawless);
-    }
-  }
+  // (No wave-clear screens: the night only ends at dawn, or when you fall)
 }
 
 function damageTower(amount) {
@@ -2056,11 +2180,10 @@ function endHordeRound() {
     const msg   = document.getElementById('gameover-msg');
     const score = document.getElementById('final-score-display');
 
-    const full = Math.max(0, STATE.wave - 1);
     title.textContent = STATE.deathCause === 'tower' ? '🏰 TOWER DESTROYED!' : '💀 YOU FELL!';
     title.style.color = 'var(--accent-red)';
-    msg.textContent   = `You survived ${full} full wave${full === 1 ? '' : 's'} and slew ${STATE.totalKills} enemies! Best combo: x${STATE.bestCombo}`;
-    score.textContent = `SCORE ${STATE.score} | WAVE ${STATE.wave}`;
+    msg.textContent   = `You lasted ${fmtTime(night.elapsed)} of the ${fmtTime(night.len)} night and slew ${STATE.totalKills} enemies! Best combo: x${STATE.bestCombo}`;
+    score.textContent = `SCORE ${STATE.score} | LEVEL ${STATE.wave}`;
     el.classList.remove('hidden');
     saveLeaderboard(STATE.totalKills, STATE.wave);
     saveProgress();
@@ -2185,14 +2308,6 @@ function onPointerDown(e){
   else if(STATE.mode==='online') tp = netRole==='guest' ? players[1] : players[0];
   if(!tp||tp.isAI||tp.isDead) return;
 
-  // Click on enemy / target: auto shoot with parabolic trajectory instantly!
-  const tgt = findTargetAt(pos, tp);
-  if (tgt) {
-    autoShootAtTarget(tp, tgt);
-    aimState.active = false;
-    return;
-  }
-
   aimState={active:true,startX:pos.x,startY:pos.y,curX:pos.x,curY:pos.y,player:tp,hasDragged:false};
   tp.isAiming=true; tp.aimPower=0;
 }
@@ -2225,9 +2340,8 @@ function onPointerUp(e){
   const pos=getEventPos(e,canvas);
 
   if (!aimState.hasDragged) {
-    // Was a tap/click in open space: auto-shoot towards closest target or clicked point
-    const tgt = findTargetAt(pos, p);
-    autoShootAtTarget(p, tgt, pos);
+    // A tap/click: fire an arrow that lands exactly on the clicked point (no enemy auto-lock)
+    autoShootAtTarget(p, null, pos);
   } else if(p&&p.isAiming&&p.aimPower>0.5&&!STATE.paused) {
     shootArrow(p);
     if(STATE.mode==='online'&&netConn&&netConn.open){
@@ -2754,9 +2868,21 @@ function drawHordeHUD() {
   ctx.textAlign = 'center';
   ctx.font = 'bold 14px "Orbitron",monospace';
   ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.fillStyle = '#e8eaf0';
-  const txt = `SCORE ${STATE.score.toLocaleString()}    ☠ ${left} LEFT`;
+  const txt = `🌙 ${fmtTime(night.len - night.elapsed)}    SCORE ${STATE.score.toLocaleString()}    ☠ ${left}`;
   const hy = 76 + (document.getElementById('ammo-menu')?.offsetHeight || 0) + 22;   // below the pinned menu
   ctx.strokeText(txt, W/2, hy); ctx.fillText(txt, W/2, hy);
+  // Danger pulse when the tower is about to fall
+  const tPct = STATE.towerHp / STATE.towerMax;
+  if (tPct < 0.3 && !STATE.roundOver) {
+    ctx.strokeStyle = `rgba(239,68,68,${0.25 + 0.3 * Math.abs(Math.sin(Date.now() / 220))})`;
+    ctx.lineWidth = 10;
+    ctx.strokeRect(0, 0, W, H);
+    ctx.font = 'bold 13px "Orbitron",monospace';
+    ctx.fillStyle = '#fca5a5'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    const wt = `⚠ TOWER CRITICAL ${Math.round(tPct * 100)}%`;
+    ctx.strokeText(wt, W/2, hy + 18); ctx.fillText(wt, W/2, hy + 18);
+  }
+  ctx.font = 'bold 14px "Orbitron",monospace'; ctx.fillStyle = '#e8eaf0'; ctx.strokeStyle = 'rgba(0,0,0,0.7)';
   if (STATE.combo >= 2) {
     const f = Math.max(0, STATE.comboTimer / 4);
     ctx.font = 'bold 20px "Orbitron",monospace';
@@ -2914,7 +3040,7 @@ function updateHUD(){
 function updateHordeHUD(){
   document.getElementById('p1-score').textContent=STATE.kills;
   document.getElementById('p2-score').textContent=STATE.totalKills;
-  document.getElementById('round-display').textContent=`WAVE ${STATE.wave}`;
+  document.getElementById('round-display').textContent=`NIGHT LV ${STATE.wave}`;
   const nm = document.getElementById('p2-name');
   if (nm && STATE.mode === '1player') nm.textContent = `💰 ${STATE.coins}`;
 }
@@ -3192,7 +3318,7 @@ function startGame(mode){
   }
   document.getElementById('p1-score').textContent='0';
   document.getElementById('p2-score').textContent='0';
-  document.getElementById('round-display').textContent = horde ? 'WAVE 1' : 'ROUND 1';
+  document.getElementById('round-display').textContent = horde ? 'NIGHT LV 1' : 'ROUND 1';
   document.getElementById('next-round-btn').textContent = horde ? 'NEXT WAVE ▶' : 'NEXT ROUND ▶';
   setHint();
 
@@ -3348,7 +3474,7 @@ function restartGame(){
   placedDefences.length=0;
   document.getElementById('p1-score').textContent=0;
   document.getElementById('p2-score').textContent=0;
-  document.getElementById('round-display').textContent=STATE.mode==='1player'?'WAVE 1':'ROUND 1';
+  document.getElementById('round-display').textContent=STATE.mode==='1player'?'NIGHT LV 1':'ROUND 1';
   document.getElementById('next-round-btn').textContent=STATE.mode==='1player'?'NEXT WAVE ▶':'NEXT ROUND ▶';
   if(STATE.mode==='1player'){
     repositionPlayer();
@@ -3604,8 +3730,8 @@ function loadProgress(){
 function updateBestLine(){
   const el=document.getElementById('best-line');
   if(el) el.textContent = STATE.bestWave>0
-    ? `🏆 Best wave: ${STATE.bestWave}   •   💰 Coins: ${STATE.coins}`
-    : 'Survive the horde — defend your tower!';
+    ? `🏆 Best night level: ${STATE.bestWave}   •   💰 Coins: ${STATE.coins}`
+    : 'Survive the night — defend your tower until dawn!';
 }
 
 function cycleArrow(dir){
@@ -3656,6 +3782,15 @@ let lastNetSync = 0;
 let lastPingSent = 0;
 let lastAimSent = 0;
 let lastInputSent = 0;
+
+// Survive the Night: pick how long the night lasts, then start
+function showNightPicker(){ document.getElementById('night-screen').classList.remove('hidden'); }
+function closeNightPicker(){ document.getElementById('night-screen').classList.add('hidden'); }
+function pickNight(seconds){
+  nightLenSec = seconds;
+  closeNightPicker();
+  startGame('1player');
+}
 
 function showOnlineScreen(){
   document.getElementById('online-screen')?.classList.remove('hidden');
